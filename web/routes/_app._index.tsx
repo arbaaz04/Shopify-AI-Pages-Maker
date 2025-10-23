@@ -177,8 +177,8 @@ export default function Index() {
     try {
       setIsRefreshing(true);
       
-      // Call our custom action to fetch Shopify products
-      const response = await (api as any).getShopifyProducts({ first: 100 });
+      // Call our custom action to fetch Shopify products with pagination support
+      const response = await (api as any).getShopifyProducts({ first: 250, maxProducts: 1000 });
       
       if (response.success && response.products) {
         // Transform Shopify products to our format
@@ -230,8 +230,8 @@ export default function Index() {
       try {
         setIsLoading(true);
         
-                // Call our custom action to fetch Shopify products
-        const response = await (api as any).getShopifyProducts({ first: 100 });
+                // Call our custom action to fetch Shopify products with pagination support
+        const response = await (api as any).getShopifyProducts({ first: 250, maxProducts: 1000 });
         
         if (response.success && response.products) {
           // Transform Shopify products to our format

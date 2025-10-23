@@ -367,7 +367,7 @@ export default function EditAiContent() {
       console.log('Fetching product name for ID:', productId);
       
       // Use the getShopifyProducts action to fetch products and find the specific one
-      await getShopifyProducts({ first: 250 }); // Fetch more products to find the one we need
+      await (getShopifyProducts as any)({ first: 250, maxProducts: 1000 }); // Fetch up to 1000 products to find the one we need
       
     } catch (error) {
       console.error('Error fetching product name:', error);
