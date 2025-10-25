@@ -1,46 +1,4 @@
-/**
- * Flatten and transform webhook content using the same approach as editor
- */
-function transformWebhookContent(content: any, logger: any): any {
-  // First flatten all nested sections to root level
-  const flattenedContent: Record<string, any> = {};
-  
-  Object.entries(content).forEach(([key, value]) => {
-    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      // If it's a nested object, flatten it
-      Object.entries(value as Record<string, any>).forEach(([nestedKey, nestedValue]) => {
-        flattenedContent[nestedKey] = nestedValue;
-      });
-    } else {
-      // If it's a direct value, use it as is
-      flattenedContent[key] = value;
-    }
-  });
-  
-  // Apply the same field transformations as editor
-  const fieldMapping = {
-    "How_To_Get_Maximum_Results_headline": "maximize_results_headline",
-    "How_To_Get_Maximum_Results_1_image": "maximize_results_1_image",
-    "How_To_Get_Maximum_Results_title_1": "maximize_results_title_1", 
-    "How_To_Get_Maximum_Results_description_1": "maximize_results_description_1",
-    "How_To_Get_Maximum_Results_2_image": "maximize_results_2_image",
-    "How_To_Get_Maximum_Results_title_2": "maximize_results_title_2",
-    "How_To_Get_Maximum_Results_description_2": "maximize_results_description_2", 
-    "How_To_Get_Maximum_Results_3_image": "maximize_results_3_image",
-    "How_To_Get_Maximum_Results_title_3": "maximize_results_title_3",
-    "How_To_Get_Maximum_Results_description_3": "maximize_results_description_3"
-  };
-  
-  // Transform field names
-  Object.entries(fieldMapping).forEach(([originalField, mappedField]) => {
-    if (flattenedContent[originalField]) {
-      flattenedContent[mappedField] = flattenedContent[originalField];
-      delete flattenedContent[originalField];
-    }
-  });
-  
-  return flattenedContent;
-}
+import { RouteHandler } from "gadget-server";
 
 /**
  * MindPal webhook receiver - Backend HTTP route
@@ -48,7 +6,7 @@ function transformWebhookContent(content: any, logger: any): any {
  * URL: https://pagebuilder--development.gadget.app/mindpal-webhook
  */
 
-const route = async ({ request, reply, api, logger }: any) => {
+const route: RouteHandler = async ({ request, reply, api, logger }) => {
   try {
     // Get the raw payload from MindPal
     const payload = request.body;
@@ -126,27 +84,51 @@ async function processWebhookData(payload: any, logger: any, api: any) {
     // Extract AI content from workflow_run_output array
     let aiContent = null;
     if (payload?.workflow_run_output && Array.isArray(payload.workflow_run_output)) {
+
       for (const output of payload.workflow_run_output) {
+
         try {
           let contentToParse = output.content;
           
-          // Extract JSON from markdown code blocks if needed
+          // Check if content is wrapped in markdown code blocks
           if (contentToParse && contentToParse.includes('```json')) {
+            // Extract JSON from markdown code blocks
             const jsonMatch = contentToParse.match(/```json\s*\n([\s\S]*?)\n```/);
             if (jsonMatch && jsonMatch[1]) {
               contentToParse = jsonMatch[1].trim();
             }
           }
           
-          // Parse and use any valid JSON content
+          // Parse the cleaned content as JSON
           const parsedContent = JSON.parse(contentToParse);
+          
+          // Check if this looks like our AI sales page content with the new nested structure
           if (parsedContent && typeof parsedContent === 'object') {
-            aiContent = parsedContent;
-            logger.info("Found AI content" as any);
-            break;
+            // Check for the expected top-level sections in the new format
+            const expectedSections = [
+              'dynamic_buy_box', 'problem_symptoms', 'product_introduction', 
+              'three_steps', 'cta', 'before_after_transformation', 'featured_reviews',
+              'key_differences', 'product_comparison', 'where_to_use', 'who_its_for',
+              'maximize_results', 'cost_of_inaction', 'choose_your_package',
+              'guarantee', 'faq', 'store_credibility'
+            ];
+            
+            const foundSections = expectedSections.filter(section => parsedContent[section]);
+            
+            if (foundSections.length > 0) {
+              aiContent = parsedContent;
+              logger.info("Found structured AI content with nested format" as any, {
+                contentSections: foundSections,
+                totalSections: foundSections.length
+              });
+              break;
+            }
           }
         } catch (e) {
-          // Continue to next output
+          // If not JSON, might be plain text content
+          if (output.content && typeof output.content === 'string' && output.content.length > 50) {
+            aiContent = { raw_content: output.content, output_title: output.title };
+          }
         }
       }
     }
@@ -184,6 +166,12 @@ async function processWebhookData(payload: any, logger: any, api: any) {
 
           // If we have AI content, create or update the AI content draft
           if (aiContent) {
+            logger.info("Creating AI content draft with structured data" as any, { 
+              jobId: generationJobId,
+              productId: generationJob.productId,
+              shopDomain: shopDomain
+            });
+
             try {
               // Check if draft already exists for this generation job
               let existingDraft = null;
@@ -201,20 +189,38 @@ async function processWebhookData(payload: any, logger: any, api: any) {
                 // If search fails, proceed to create new draft
               }
 
-              // Transform content using the same flattening approach as editor
-              const transformedContent = transformWebhookContent(aiContent, logger);
+              // Filter out unwanted fields that shouldn't be shown or published
+              const filteredContent = { ...aiContent };
+              const fieldsToRemove = [
+                'three_steps_headline',
+                'how_to_care_headline',
+                'how_to_care_title_1',
+                'how_to_care_title_2', 
+                'how_to_care_title_3',
+                'how_to_care_description_1',
+                'how_to_care_description_2',
+                'how_to_care_description_3'
+              ];
+              
+              fieldsToRemove.forEach(field => {
+                if (filteredContent[field]) {
+                  delete filteredContent[field];
+                  logger.info(`Removed unwanted field: ${field}` as any);
+                }
+              });
 
               const draftData = {
                 rawAiContent: aiContent,
-                processedContent: transformedContent,
+                processedContent: filteredContent,
                 status: 'ready_for_review' as const
               };
 
               if (existingDraft) {
                 // Update existing draft
-                await api.aiContentDraft.update(existingDraft.id, draftData);
+                const updatedDraft = await api.aiContentDraft.update(existingDraft.id, draftData);
                 logger.info("Updated existing AI content draft" as any, { 
-                  draftId: existingDraft.id
+                  draftId: existingDraft.id,
+                  shopDomain: shopDomain
                 });
               } else {
                 // Create new draft
@@ -225,10 +231,28 @@ async function processWebhookData(payload: any, logger: any, api: any) {
                   ...draftData
                 };
 
-                const newDraft = await api.aiContentDraft.create(createData);
-                logger.info("Created new AI content draft" as any, { 
-                  draftId: newDraft.id
-                });
+                try {
+                  const newDraft = await api.aiContentDraft.create(createData);
+                  logger.info("Created new AI content draft" as any, { 
+                    draftId: newDraft.id,
+                    shopDomain: shopDomain
+                  });
+                } catch (createError: any) {
+                  // Try with minimal required fields only
+                  const simplifiedData = {
+                    generationJob: { _link: generationJobId },
+                    productId: generationJob.productId,
+                    rawAiContent: aiContent,
+                    processedContent: aiContent,
+                    status: 'ready_for_review' as const
+                  };
+                  
+                  const newDraft = await api.aiContentDraft.create(simplifiedData);
+                  logger.info("Created new AI content draft with simplified data" as any, { 
+                    draftId: newDraft.id,
+                    shopDomain: shopDomain
+                  });
+                }
               }
             } catch (draftError: any) {
               logger.error("Error creating/updating AI content draft" as any, {
