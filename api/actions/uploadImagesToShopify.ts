@@ -6,6 +6,48 @@
 
 import { setupMetaobjectsAndMetafields } from "../models/shopifyShop/shared/metaobjectDefinitions";
 
+/**
+ * Transform content to handle field name variations for image processing
+ */
+function transformContentForImageUpload(content: any, logger?: any): any {
+  if (!content || typeof content !== 'object') return content;
+  
+  const transformed = { ...content };
+  
+  // Handle How_To_Get_Maximum_Results section - flatten to root level for processing
+  if (content["How_To_Get_Maximum_Results"]) {
+    logger?.info("Found How_To_Get_Maximum_Results section, flattening for image processing");
+    
+    const howToSection = content["How_To_Get_Maximum_Results"];
+    const fieldMapping = {
+      "How_To_Get_Maximum_Results_1_image": "maximize_results_1_image",
+      "How_To_Get_Maximum_Results_2_image": "maximize_results_2_image", 
+      "How_To_Get_Maximum_Results_3_image": "maximize_results_3_image"
+    };
+    
+    // Add image fields to root level with expected names
+    Object.entries(fieldMapping).forEach(([originalField, mappedField]) => {
+      if (howToSection[originalField]) {
+        transformed[mappedField] = howToSection[originalField];
+        logger?.info(`Mapped image field for upload: ${originalField} -> ${mappedField}`);
+      }
+    });
+  }
+  
+  // Handle 3_steps section - flatten to root level
+  if (content["3_steps"]) {
+    logger?.info("Found 3_steps section, flattening for image processing");
+    const stepsSection = content["3_steps"];
+    Object.keys(stepsSection).forEach(key => {
+      if (key.includes('_image')) {
+        transformed[key] = stepsSection[key];
+      }
+    });
+  }
+  
+  return transformed;
+}
+
 export const params = {
   draftId: { type: "string" }
 };
@@ -51,7 +93,8 @@ const IMAGE_FIELD_DEFINITIONS = {
     'avatar_4_image', 'avatar_5_image', 'avatar_6_image'
   ],
   maximize_results: [
-    'maximize_results_1_image', 'maximize_results_2_image', 'maximize_results_3_image'
+    'maximize_results_1_image', 'maximize_results_2_image', 'maximize_results_3_image',
+    'How_To_Get_Maximum_Results_1_image', 'How_To_Get_Maximum_Results_2_image', 'How_To_Get_Maximum_Results_3_image'
   ],
   cost_of_inaction: [
     // No image fields in cost_of_inaction
@@ -115,7 +158,9 @@ export async function run({ params, logger, api, connections }: any) {
   }
 
   try {
-    const updatedContent = { ...processedContent };
+    // Transform content to handle field name variations before processing
+    const transformedContent = transformContentForImageUpload(processedContent, logger);
+    const updatedContent = { ...transformedContent };
     const uploadResults = {
       totalImages: 0,
       successful: 0,

@@ -87,6 +87,7 @@ const CONTENT_SECTIONS = {
   "3 Steps": {
     description: "Simple step-by-step guide showing how to use your product",
     fields: [
+      "3_steps_headline",
       "step_1_image",
       "step_1_headline",
       "step_1_description",
@@ -305,6 +306,58 @@ const CONTENT_SECTIONS = {
   }
 };
 
+/**
+ * Transform content to handle field name mapping for direct JSON imports
+ */
+function transformEditorContent(content: Record<string, any>): Record<string, any> {
+  const transformed = { ...content };
+  
+  // Handle How_To_Get_Maximum_Results field mapping
+  const howToMaxResultsMapping = {
+    "How_To_Get_Maximum_Results_headline": "maximize_results_headline",
+    "How_To_Get_Maximum_Results_1_image": "maximize_results_1_image",
+    "How_To_Get_Maximum_Results_title_1": "maximize_results_title_1", 
+    "How_To_Get_Maximum_Results_description_1": "maximize_results_description_1",
+    "How_To_Get_Maximum_Results_2_image": "maximize_results_2_image",
+    "How_To_Get_Maximum_Results_title_2": "maximize_results_title_2",
+    "How_To_Get_Maximum_Results_description_2": "maximize_results_description_2", 
+    "How_To_Get_Maximum_Results_3_image": "maximize_results_3_image",
+    "How_To_Get_Maximum_Results_title_3": "maximize_results_title_3",
+    "How_To_Get_Maximum_Results_description_3": "maximize_results_description_3"
+  };
+  
+  // Transform How_To_Get_Maximum_Results fields to maximize_results fields
+  Object.entries(howToMaxResultsMapping).forEach(([originalField, mappedField]) => {
+    if (transformed[originalField]) {
+      transformed[mappedField] = transformed[originalField];
+      delete transformed[originalField];
+      console.log(`Mapped field: ${originalField} -> ${mappedField}`);
+    }
+  });
+  
+  return transformed;
+}
+
+/**
+ * Check if transformations were actually applied
+ */
+function checkForTransformations(original: Record<string, any>, transformed: Record<string, any>): boolean {
+  // Check if any How_To_Get_Maximum_Results fields were transformed
+  const howToFields = Object.keys(original).filter(key => key.startsWith('How_To_Get_Maximum_Results_'));
+  const transformedFields = Object.keys(transformed).filter(key => key.startsWith('maximize_results_'));
+  
+  // If we have How_To fields in original but not in transformed, and we have maximize_results fields, transformation happened
+  const hasHowToTransformation = howToFields.length > 0 && transformedFields.length > 0;
+  
+  console.log('Transformation check:', {
+    originalHowToFields: howToFields.length,
+    transformedMaxFields: transformedFields.length,
+    hasTransformation: hasHowToTransformation
+  });
+  
+  return hasHowToTransformation;
+}
+
 export default function EditAiContent() {
   const { draftId } = useParams();
   const navigate = useNavigate();
@@ -436,7 +489,19 @@ export default function EditAiContent() {
         }
       });
       
-      setEditedContent(flattenedContent);
+      // Transform field names to match editor expectations
+      const transformedContent = transformEditorContent(flattenedContent);
+      
+      // Check if transformation actually changed anything
+      const hasTransformations = checkForTransformations(flattenedContent, transformedContent);
+      
+      setEditedContent(transformedContent);
+      
+      // If transformations were applied, automatically save the transformed content
+      if (hasTransformations) {
+        console.log('Transformations detected, automatically saving transformed content...');
+        autoSaveTransformedContent(transformedContent);
+      }
     }
     
     // Fetch product name if we have a productId
@@ -476,6 +541,73 @@ export default function EditAiContent() {
     setEditedContent(prev => ({ ...prev, [field]: value }));
     setHasChanges(true);
   }, []);
+
+  // Auto-save transformed content when transformations are detected
+  const autoSaveTransformedContent = useCallback(async (transformedContent: Record<string, any>) => {
+    if (!draft?.id) return;
+    
+    try {
+      console.log('Auto-saving transformed content...');
+      
+      // Restructure the transformed content the same way as manual save
+      const restructuredContent: Record<string, any> = {};
+      
+      // Group fields back into their sections
+      const sectionKeyMapping = {
+        "Dynamic Buy Box": "dynamic_buy_box",
+        "Problem Symptoms": "problem_symptoms", 
+        "Product Introduction": "product_introduction",
+        "3 Steps": "three_steps",
+        "CTA": "cta",
+        "Before/After Transformation": "before_after_transformation",
+        "Featured Reviews": "featured_reviews",
+        "Key Differences": "key_differences",
+        "Product Comparison": "product_comparison",
+        "Where to Use": "where_to_use",
+        "Who It's For": "who_its_for",
+        "Maximize Results": "maximize_results",
+        "Cost of Inaction": "cost_of_inaction",
+        "Choose Your Package": "choose_your_package",
+        "Guarantee": "guarantee",
+        "FAQ": "faq",
+        "Store Credibility": "store_credibility"
+      };
+      
+      Object.entries(CONTENT_SECTIONS).forEach(([sectionName, sectionData]) => {
+        const sectionKey = sectionKeyMapping[sectionName as keyof typeof sectionKeyMapping];
+        const sectionFields: Record<string, any> = {};
+        
+        sectionData.fields.forEach((field: string) => {
+          if (transformedContent.hasOwnProperty(field)) {
+            sectionFields[field] = transformedContent[field];
+          }
+        });
+        
+        if (Object.keys(sectionFields).length > 0) {
+          restructuredContent[sectionKey] = sectionFields;
+        }
+      });
+      
+      // Add any additional fields that don't belong to predefined sections
+      const allDefinedFields = Object.values(CONTENT_SECTIONS).flatMap(section => section.fields);
+      Object.entries(transformedContent).forEach(([field, value]) => {
+        if (!allDefinedFields.includes(field)) {
+          restructuredContent[field] = value;
+        }
+      });
+
+      await updateDraft({
+        id: draft.id,
+        processedContent: restructuredContent
+      });
+      
+      console.log('Auto-save completed successfully');
+      // Auto-save completed silently
+    } catch (error: any) {
+      console.error('Auto-save failed:', error);
+      // Don't show error toast for auto-save failures to avoid being intrusive
+    }
+  }, [draft?.id, updateDraft, shopify]);
 
   const handleSave = useCallback(async () => {
     if (!draft?.id) return;
