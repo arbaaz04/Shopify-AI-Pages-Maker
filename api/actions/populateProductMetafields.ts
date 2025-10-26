@@ -5,131 +5,7 @@
  */
 
 import { setupMetaobjectsAndMetafields } from "../models/shopifyShop/shared/metaobjectDefinitions";
-
-/**
- * Transform the content structure to match expected metaobject field names
- */
-function transformContentStructure(content: any, logger?: any): any {
-  const transformed = { ...content };
-  
-  logger?.info("transformContentStructure called with sections:", { 
-    inputSections: Object.keys(content),
-    hasHowToSection: !!content["How_To_Get_Maximum_Results"]
-  });
-  
-  // Handle section name mapping: "3_steps" -> "three_steps"
-  if (content["3_steps"]) {
-    transformed["three_steps"] = { ...content["3_steps"] };
-    
-    // Add the missing 3_steps_headline field from the section data
-    if (content["3_steps"]["3_steps_headline"]) {
-      transformed["three_steps"]["3_steps_headline"] = content["3_steps"]["3_steps_headline"];
-    }
-    
-    delete transformed["3_steps"];
-    logger?.info("Transformed 3_steps to three_steps");
-  }
-  
-  // Handle section name mapping: "How_To_Get_Maximum_Results" -> "maximize_results"
-  if (content["How_To_Get_Maximum_Results"]) {
-    logger?.info("Found How_To_Get_Maximum_Results section, transforming...", {
-      originalFields: Object.keys(content["How_To_Get_Maximum_Results"])
-    });
-    
-    transformed["maximize_results"] = {};
-    
-    // Map the fields with correct naming (JSON field names -> Shopify field names)
-    const howToSection = content["How_To_Get_Maximum_Results"];
-    const fieldMapping = {
-      "How_To_Get_Maximum_Results_headline": "maximize_results_headline",
-      "How_To_Get_Maximum_Results_1_image": "maximize_results_1_image",
-      "How_To_Get_Maximum_Results_title_1": "maximize_results_title_1", 
-      "How_To_Get_Maximum_Results_description_1": "maximize_results_description_1",
-      "How_To_Get_Maximum_Results_2_image": "maximize_results_2_image",
-      "How_To_Get_Maximum_Results_title_2": "maximize_results_title_2",
-      "How_To_Get_Maximum_Results_description_2": "maximize_results_description_2", 
-      "How_To_Get_Maximum_Results_3_image": "maximize_results_3_image",
-      "How_To_Get_Maximum_Results_title_3": "maximize_results_title_3",
-      "How_To_Get_Maximum_Results_description_3": "maximize_results_description_3"
-    };
-    
-    Object.keys(howToSection).forEach(jsonKey => {
-      const shopifyKey = fieldMapping[jsonKey as keyof typeof fieldMapping] || jsonKey;
-      transformed["maximize_results"][shopifyKey] = howToSection[jsonKey];
-      logger?.info(`Mapped field: ${jsonKey} -> ${shopifyKey}`);
-    });
-    
-    delete transformed["How_To_Get_Maximum_Results"];
-    logger?.info("Transformed How_To_Get_Maximum_Results to maximize_results with field mapping", {
-      transformedFields: Object.keys(transformed["maximize_results"])
-    });
-  } else if (content["maximize_results_headline"] || content["maximize_results_1_image"]) {
-    // Handle flattened structure from editor (fields are at root level)
-    logger?.info("Found flattened maximize_results fields, reconstructing section...");
-    
-    transformed["maximize_results"] = {};
-    
-    const maximizeResultsFields = [
-      "maximize_results_headline", "maximize_results_1_image", "maximize_results_title_1", "maximize_results_description_1",
-      "maximize_results_2_image", "maximize_results_title_2", "maximize_results_description_2",
-      "maximize_results_3_image", "maximize_results_title_3", "maximize_results_description_3"
-    ];
-    
-    maximizeResultsFields.forEach(field => {
-      if (content[field]) {
-        transformed["maximize_results"][field] = content[field];
-        delete transformed[field]; // Remove from root level
-      }
-    });
-    
-    logger?.info("Reconstructed maximize_results section from flattened fields", {
-      reconstructedFields: Object.keys(transformed["maximize_results"])
-    });
-  } else {
-    // Check if we have a nested maximize_results section already (from editor restructuring)
-    if (content["maximize_results"] && typeof content["maximize_results"] === 'object') {
-      logger?.info("Found existing maximize_results section, keeping as-is");
-    } else {
-      logger?.info("No maximize_results data found in any format");
-    }
-  }
-  
-  // Handle product_main_headline - move it to dynamic_buy_box section
-  if (content["product_main_headline"]) {
-    if (!transformed["dynamic_buy_box"]) {
-      transformed["dynamic_buy_box"] = {};
-    }
-    transformed["dynamic_buy_box"]["product_main_headline"] = content["product_main_headline"];
-    delete transformed["product_main_headline"];
-    logger?.info("Moved product_main_headline to dynamic_buy_box section");
-  }
-  
-  // Handle testimonials_review_widget -> store_credibility mapping
-  if (content["testimonials_review_widget"]) {
-    if (!transformed["store_credibility"]) {
-      transformed["store_credibility"] = {};
-    }
-    // Map review_widget_headline
-    if (content["testimonials_review_widget"]["review_widget_headline"]) {
-      transformed["store_credibility"]["review_widget_headline"] = content["testimonials_review_widget"]["review_widget_headline"];
-    }
-    delete transformed["testimonials_review_widget"];
-    logger?.info("Transformed testimonials_review_widget to store_credibility");
-  }
-  
-  // Handle any top-level "3_steps_headline" that might not be in a section
-  if (content["3_steps_headline"] && !transformed["three_steps"]) {
-    transformed["three_steps"] = { "3_steps_headline": content["3_steps_headline"] };
-    delete transformed["3_steps_headline"];
-    logger?.info("Moved top-level 3_steps_headline to three_steps section");
-  } else if (content["3_steps_headline"] && transformed["three_steps"]) {
-    transformed["three_steps"]["3_steps_headline"] = content["3_steps_headline"];
-    delete transformed["3_steps_headline"];
-    logger?.info("Added 3_steps_headline to existing three_steps section");
-  }
-  
-  return transformed;
-}
+import { transformContent } from "../shared/contentTransformation";
 
 export const params = {
   draftId: { type: "string" },
@@ -209,7 +85,7 @@ export async function run({ params, logger, api, connections }: any) {
       hasMaximizeResults: !!processedContent["maximize_results"]
     });
     
-    const content = transformContentStructure(processedContent, logger);
+    const content = transformContent(processedContent, logger);
     
     logger?.info("Content sections after transformation:", { 
       sections: Object.keys(content),

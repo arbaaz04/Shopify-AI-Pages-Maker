@@ -5,113 +5,10 @@
  */
 
 import { setupMetaobjectsAndMetafields } from "../models/shopifyShop/shared/metaobjectDefinitions";
-
-/**
- * Transform content to handle field name variations for image processing
- */
-function transformContentForImageUpload(content: any, logger?: any): any {
-  if (!content || typeof content !== 'object') return content;
-  
-  const transformed = { ...content };
-  
-  // Handle How_To_Get_Maximum_Results section - flatten to root level for processing
-  if (content["How_To_Get_Maximum_Results"]) {
-    logger?.info("Found How_To_Get_Maximum_Results section, flattening for image processing");
-    
-    const howToSection = content["How_To_Get_Maximum_Results"];
-    const fieldMapping = {
-      "How_To_Get_Maximum_Results_1_image": "maximize_results_1_image",
-      "How_To_Get_Maximum_Results_2_image": "maximize_results_2_image", 
-      "How_To_Get_Maximum_Results_3_image": "maximize_results_3_image"
-    };
-    
-    // Add image fields to root level with expected names
-    Object.entries(fieldMapping).forEach(([originalField, mappedField]) => {
-      if (howToSection[originalField]) {
-        transformed[mappedField] = howToSection[originalField];
-        logger?.info(`Mapped image field for upload: ${originalField} -> ${mappedField}`);
-      }
-    });
-  }
-  
-  // Handle 3_steps section - flatten to root level
-  if (content["3_steps"]) {
-    logger?.info("Found 3_steps section, flattening for image processing");
-    const stepsSection = content["3_steps"];
-    Object.keys(stepsSection).forEach(key => {
-      if (key.includes('_image')) {
-        transformed[key] = stepsSection[key];
-      }
-    });
-  }
-  
-  return transformed;
-}
+import { flattenContent, getImageFields } from "../shared/contentTransformation";
 
 export const params = {
   draftId: { type: "string" }
-};
-
-// Define all image fields across all metaobject types
-const IMAGE_FIELD_DEFINITIONS = {
-  dynamic_buy_box: [
-    // No image fields in dynamic_buy_box
-  ],
-  problem_symptoms: [
-    'symptom_1_image', 'symptom_2_image', 'symptom_3_image',
-    'symptom_4_image', 'symptom_5_image', 'symptom_6_image'
-  ],
-  product_introduction: [
-    'feature_1_image', 'feature_2_image', 'feature_3_image',
-    'feature_4_image', 'feature_5_image', 'feature_6_image'
-  ],
-  three_steps: [
-    'step_1_image', 'step_2_image', 'step_3_image'
-  ],
-  cta: [
-    // No image fields in CTA
-  ],
-  before_after_transformation: [
-    'transformation_1_image', 'transformation_2_image',
-    'transformation_3_image', 'transformation_4_image'
-  ],
-  featured_reviews: [
-    // No image fields in featured_reviews
-  ],
-  key_differences: [
-    'difference_1_image', 'difference_2_image', 'difference_3_image'
-  ],
-  product_comparison: [
-    'checkmark_icon', 'x_icon'
-  ],
-  where_to_use: [
-    'location_1_image', 'location_2_image', 'location_3_image',
-    'location_4_image', 'location_5_image', 'location_6_image'
-  ],
-  who_its_for: [
-    'avatar_1_image', 'avatar_2_image', 'avatar_3_image',
-    'avatar_4_image', 'avatar_5_image', 'avatar_6_image'
-  ],
-  maximize_results: [
-    'maximize_results_1_image', 'maximize_results_2_image', 'maximize_results_3_image',
-    'How_To_Get_Maximum_Results_1_image', 'How_To_Get_Maximum_Results_2_image', 'How_To_Get_Maximum_Results_3_image'
-  ],
-  cost_of_inaction: [
-    // No image fields in cost_of_inaction
-  ],
-  choose_your_package: [
-    'package_1_image', 'package_2_image', 'package_3_image'
-  ],
-  guarantee: [
-    'guarantee_seal_image'
-  ],
-  faq: [
-    // No image fields in FAQ
-  ],
-  store_credibility: [
-    'store_benefit_1_image', 'store_benefit_2_image', 'store_benefit_3_image',
-    'as_seen_in_logos_image'
-  ]
 };
 
 export async function run({ params, logger, api, connections }: any) {
@@ -159,7 +56,8 @@ export async function run({ params, logger, api, connections }: any) {
 
   try {
     // Transform content to handle field name variations before processing
-    const transformedContent = transformContentForImageUpload(processedContent, logger);
+    // Flatten content to ensure all image fields are at root level
+    const transformedContent = flattenContent(processedContent, logger);
     const updatedContent = { ...transformedContent };
     const uploadResults = {
       totalImages: 0,
@@ -175,7 +73,7 @@ export async function run({ params, logger, api, connections }: any) {
         continue;
       }
       
-      const imageFields = IMAGE_FIELD_DEFINITIONS[sectionKey as keyof typeof IMAGE_FIELD_DEFINITIONS] || [];
+      const imageFields = getImageFields(sectionKey as any);
       
       if (imageFields.length === 0) {
         logger?.info(`No image fields defined for section: ${sectionKey}`);
