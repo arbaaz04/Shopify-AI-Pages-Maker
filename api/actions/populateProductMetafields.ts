@@ -253,14 +253,6 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
     totalFields: Object.keys(sectionData).length
   });
   
-  // Define field types that expect different formatting
-  const richTextFields = [
-    'buybox_benefit_1_4',        // dynamic_buy_box: rich_text_field
-    'product_intro_description', // product_introduction: rich_text_field
-    'cost_of_inaction_description',  // cost_of_inaction: rich_text_field
-    // Add other rich text fields here as we find them
-  ];
-  
   // Define fields that should be file references (images)
   const fileReferenceFields = [
     // problem_symptoms
@@ -436,43 +428,11 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
         }
       }
     } else {
-      // Handle different field types
-      let processedValue = stringValue;
-      
-      if (richTextFields.includes(key)) {
-        // For rich text fields, create proper JSON structure
-        try {
-          // Create a simple rich text JSON structure
-          processedValue = JSON.stringify({
-            "type": "root",
-            "children": [
-              {
-                "type": "paragraph",
-                "children": [
-                  {
-                    "type": "text",
-                    "value": stringValue
-                  }
-                ]
-              }
-            ]
-          });
-          
-          logger?.info(`Formatted rich text field ${key}`, {
-            original: stringValue,
-            formatted: processedValue
-          });
-        } catch (error) {
-          logger?.warn(`Failed to format rich text for ${key}, using plain text`, error);
-          processedValue = stringValue;
-        }
-      } else {
-        // For regular text fields, ensure clean string without special characters that could break GraphQL
-        processedValue = stringValue
-          .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
-          .replace(/\\/g, '\\\\')          // Escape backslashes
-          .replace(/"/g, '\\"');           // Escape quotes
-      }
+      // Handle regular text fields - ensure clean string without special characters that could break GraphQL
+      const processedValue = stringValue
+        .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
+        .replace(/\\/g, '\\\\')          // Escape backslashes
+        .replace(/"/g, '\\"');           // Escape quotes
       
       processedFields.push({ key, value: processedValue });
     }

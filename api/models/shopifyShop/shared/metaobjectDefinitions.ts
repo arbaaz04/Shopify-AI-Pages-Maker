@@ -10,7 +10,7 @@ export const METAOBJECT_DEFINITIONS: any[] = [
     fieldDefinitions: [
       { key: "product_main_headline", name: "Product Main Headline", type: "single_line_text_field" },
       { key: "buybox_product_title", name: "Buybox Product Title", type: "single_line_text_field" },
-      { key: "buybox_benefit_1_4", name: "Buybox Benefit 1-4", type: "rich_text_field" },
+      { key: "buybox_benefit_1_4", name: "Buybox Benefit 1-4", type: "multi_line_text_field" },
       { key: "buybox_review_1", name: "Buybox Review 1", type: "multi_line_text_field" },
       { key: "buybox_review_2", name: "Buybox Review 2", type: "multi_line_text_field" },
       { key: "buybox_review_3", name: "Buybox Review 3", type: "multi_line_text_field" },
@@ -54,7 +54,7 @@ export const METAOBJECT_DEFINITIONS: any[] = [
     fieldDefinitions: [
       { key: "product_intro_headline", name: "Product Intro Headline", type: "single_line_text_field" },
       { key: "product_intro_subheadline", name: "Product Intro Subheadline", type: "single_line_text_field" },
-      { key: "product_intro_description", name: "Product Intro Description", type: "rich_text_field" },
+      { key: "product_intro_description", name: "Product Intro Description", type: "multi_line_text_field" },
       { key: "feature_1_image", name: "Feature 1 Image", type: "file_reference" },
       { key: "feature_1_headline", name: "Feature 1 Headline", type: "single_line_text_field" },
       { key: "feature_1_description", name: "Feature 1 Description", type: "multi_line_text_field" },
@@ -265,7 +265,7 @@ export const METAOBJECT_DEFINITIONS: any[] = [
     capabilities: { publishable: { enabled: true } },
     fieldDefinitions: [
       { key: "cost_of_inaction_headline", name: "Cost Of Inaction Headline", type: "single_line_text_field" },
-      { key: "cost_of_inaction_description", name: "Cost Of Inaction Description", type: "rich_text_field" },
+      { key: "cost_of_inaction_description", name: "Cost Of Inaction Description", type: "multi_line_text_field" },
     ],
   },
   // 15. Choose Your Package
@@ -280,16 +280,19 @@ export const METAOBJECT_DEFINITIONS: any[] = [
       { key: "package_1_image", name: "Package 1 Image", type: "file_reference" },
       { key: "package_1_title", name: "Package 1 Title", type: "single_line_text_field" },
       { key: "package_1_sub_title", name: "Package 1 Sub Title", type: "single_line_text_field" },
+      { key: "package_1_description", name: "Package 1 Description", type: "multi_line_text_field" },
       { key: "package_1_strike_through_price", name: "Package 1 Strike Through Price", type: "single_line_text_field" },
       { key: "package_1_savings", name: "Package 1 Savings", type: "single_line_text_field" },
       { key: "package_2_image", name: "Package 2 Image", type: "file_reference" },
       { key: "package_2_title", name: "Package 2 Title", type: "single_line_text_field" },
       { key: "package_2_sub_title", name: "Package 2 Sub Title", type: "single_line_text_field" },
+      { key: "package_2_description", name: "Package 2 Description", type: "multi_line_text_field" },
       { key: "package_2_strike_through_price", name: "Package 2 Strike Through Price", type: "single_line_text_field" },
       { key: "package_2_savings", name: "Package 2 Savings", type: "single_line_text_field" },
       { key: "package_3_image", name: "Package 3 Image", type: "file_reference" },
       { key: "package_3_title", name: "Package 3 Title", type: "single_line_text_field" },
       { key: "package_3_sub_title", name: "Package 3 Sub Title", type: "single_line_text_field" },
+      { key: "package_3_description", name: "Package 3 Description", type: "multi_line_text_field" },
       { key: "package_3_strike_through_price", name: "Package 3 Strike Through Price", type: "single_line_text_field" },
       { key: "package_3_savings", name: "Package 3 Savings", type: "single_line_text_field" },
     ],
@@ -443,6 +446,31 @@ function compareMetaobjectDefinitions(existing: any, desired: any, logger?: any)
   return false; // No differences found
 }
 
+// Helper function to check if changes can be safely updated in place
+function canUpdateInPlace(existing: any, desired: any, logger?: any): boolean {
+  // With the additive-only approach, we can always update in place
+  // We never delete fields or definitions, only add/update existing ones
+  logger?.info?.(`Using additive-only approach - no deletions will be performed`);
+  return true;
+}
+
+// Helper function to identify incompatible type changes
+function isIncompatibleTypeChange(existingType: string, desiredType: string): boolean {
+  // Known incompatible type pairs based on Shopify documentation
+  const incompatiblePairs = [
+    ['date_time', 'money'],
+    ['money', 'date_time'],
+    ['number_integer', 'money'],
+    ['money', 'number_integer'],
+    // Add more incompatible pairs as needed
+  ];
+  
+  return incompatiblePairs.some(([type1, type2]) => 
+    (existingType === type1 && desiredType === type2) ||
+    (existingType === type2 && desiredType === type1)
+  );
+}
+
 // Helper function to compare metafield definitions
 function compareMetafieldDefinitions(existing: any, desired: any, logger?: any): boolean {
   // Compare basic properties
@@ -456,8 +484,11 @@ function compareMetafieldDefinitions(existing: any, desired: any, logger?: any):
     return true;
   }
 
-  if (existing.type !== desired.type) {
-    logger?.info?.(`Metafield type differs: existing="${existing.type}" vs desired="${desired.type}"`);
+  // Handle type comparison - existing.type is now an object with { name, category }
+  const existingType = existing.type?.name || existing.type;
+  const desiredType = desired.type;
+  if (existingType !== desiredType) {
+    logger?.info?.(`Metafield type differs: existing="${existingType}" vs desired="${desiredType}"`);
     return true;
   }
 
@@ -482,6 +513,276 @@ function compareMetafieldDefinitions(existing: any, desired: any, logger?: any):
   }
 
   return false; // No differences found
+}
+
+// Helper function to handle field type changes with separate mutations to avoid DUPLICATE_FIELD_INPUT error
+async function handleFieldTypeChange({ connections, logger }: any, existingDefinition: any, desiredDefinition: any, fieldToChange: any, existingType: string, desiredType: string) {
+  const type = existingDefinition.type;
+  
+  logger?.warn?.(`Handling field type change for "${fieldToChange.key}": ${existingType} → ${desiredType}`);
+  logger?.warn?.(`This requires separate delete and create operations to avoid DUPLICATE_FIELD_INPUT error`);
+  
+  try {
+    // Step 1: Delete the field with the old type
+    const deleteInput = {
+      name: desiredDefinition.name,
+      access: desiredDefinition.access,
+      capabilities: desiredDefinition.capabilities,
+      fieldDefinitions: [{
+        delete: { key: fieldToChange.key }
+      }]
+    };
+    
+    const deleteMutation = `#graphql
+      mutation UpdateMetaobjectDefinition($id: ID!, $definition: MetaobjectDefinitionUpdateInput!) {
+        metaobjectDefinitionUpdate(id: $id, definition: $definition) {
+          metaobjectDefinition { id type name }
+          userErrors { field message code }
+        }
+      }
+    `;
+    
+    logger?.info?.(`Step 1: Deleting field "${fieldToChange.key}" with type ${existingType}`);
+    const deleteResult = await connections.shopify.current.graphql(deleteMutation, {
+      id: existingDefinition.id,
+      definition: deleteInput
+    });
+    
+    const deleteErrors = deleteResult?.metaobjectDefinitionUpdate?.userErrors ?? [];
+    if (deleteErrors.length > 0) {
+      logger?.error?.(`Failed to delete field "${fieldToChange.key}": ${JSON.stringify(deleteErrors)}`);
+      return { type: existingDefinition.type, id: existingDefinition.id };
+    }
+    
+    // Small delay to ensure Shopify processes the deletion
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Step 2: Create the field with the new type
+    const createInput = {
+      name: desiredDefinition.name,
+      access: desiredDefinition.access,
+      capabilities: desiredDefinition.capabilities,
+      fieldDefinitions: [{
+        create: {
+          key: fieldToChange.key,
+          name: fieldToChange.name,
+          type: fieldToChange.type,
+          validations: fieldToChange.validations || []
+        }
+      }]
+    };
+    
+    logger?.info?.(`Step 2: Creating field "${fieldToChange.key}" with type ${desiredType}`);
+    const createResult = await connections.shopify.current.graphql(deleteMutation, {
+      id: existingDefinition.id,
+      definition: createInput
+    });
+    
+    const createErrors = createResult?.metaobjectDefinitionUpdate?.userErrors ?? [];
+    if (createErrors.length > 0) {
+      logger?.error?.(`Failed to create field "${fieldToChange.key}" with new type: ${JSON.stringify(createErrors)}`);
+      return { type: existingDefinition.type, id: existingDefinition.id };
+    }
+    
+    const updated = createResult?.metaobjectDefinitionUpdate?.metaobjectDefinition;
+    if (updated?.id) {
+      logger?.info?.(`Successfully changed field type for "${fieldToChange.key}" from ${existingType} to ${desiredType}`);
+      logger?.warn?.(`Data in field "${fieldToChange.key}" was lost due to type change`);
+      return { type: updated.type, id: updated.id };
+    } else {
+      logger?.error?.(`Type change operation did not return updated definition for ${type}`);
+      return { type: existingDefinition.type, id: existingDefinition.id };
+    }
+    
+  } catch (error) {
+    logger?.error?.(`Error during field type change for "${fieldToChange.key}": ${String(error)}`);
+    return { type: existingDefinition.type, id: existingDefinition.id };
+  }
+}
+
+// Helper function to update existing metaobject definition in place (additive-only approach)
+async function updateMetaobjectDefinition({ connections, logger }: any, existingDefinition: any, desiredDefinition: any) {
+  const type = existingDefinition.type;
+  
+  try {
+    // Build the update input using Shopify's create/update operations only (no delete)
+    const updateInput: any = {
+      name: desiredDefinition.name,
+      access: desiredDefinition.access,
+      capabilities: desiredDefinition.capabilities,
+      fieldDefinitions: []
+    };
+
+    // For field definitions, we use additive-only approach: create new fields and update existing ones
+    const existingFieldMap = new Map();
+    (existingDefinition.fieldDefinitions || []).forEach((field: any) => {
+      existingFieldMap.set(field.key, field);
+    });
+
+    const desiredFieldMap = new Map();
+    (desiredDefinition.fieldDefinitions || []).forEach((field: any) => {
+      desiredFieldMap.set(field.key, field);
+    });
+
+    const operations = [];
+    let hasTypeChanges = false;
+    
+    // Handle field updates and additions only (no deletions)
+    for (const desiredField of desiredDefinition.fieldDefinitions || []) {
+      const existingField = existingFieldMap.get(desiredField.key);
+      
+      if (existingField) {
+        // Field exists - check if we need to update it
+        const existingType = existingField.type?.name || existingField.type;
+        const desiredType = desiredField.type;
+        const existingName = existingField.name;
+        const desiredName = desiredField.name;
+        
+        if (existingType !== desiredType) {
+          // Type change detected - handle this separately to avoid DUPLICATE_FIELD_INPUT error
+          logger?.warn?.(`Field type mismatch for key "${desiredField.key}": existing="${existingType}" vs desired="${desiredType}"`);
+          logger?.warn?.(`Will handle this type change in separate operations to avoid GraphQL errors`);
+          hasTypeChanges = true;
+          
+          // If there are type changes, we need to handle this field separately
+          // For now, we'll process other fields and come back to type changes
+          continue;
+        }
+        
+        // Check if anything needs updating (name or validations)
+        const needsUpdate = (
+          existingName !== desiredName ||
+          JSON.stringify(existingField.validations || []) !== JSON.stringify(desiredField.validations || [])
+        );
+        
+        if (needsUpdate) {
+          logger?.info?.(`Updating existing field: ${desiredField.key} in ${type}`);
+          operations.push({
+            update: {
+              key: desiredField.key,
+              name: desiredField.name,
+              validations: desiredField.validations || []
+            }
+          });
+        }
+        // If no changes needed, don't add any operation
+      } else {
+        // New field - create it
+        logger?.info?.(`Adding new field: ${desiredField.key} to ${type}`);
+        operations.push({
+          create: {
+            key: desiredField.key,
+            name: desiredField.name,
+            type: desiredField.type,
+            validations: desiredField.validations || []
+          }
+        });
+      }
+    }
+    
+    // If we have type changes, handle them one by one with separate operations
+    if (hasTypeChanges) {
+      logger?.info?.(`Detected field type changes - will handle these separately to avoid DUPLICATE_FIELD_INPUT errors`);
+      
+      for (const desiredField of desiredDefinition.fieldDefinitions || []) {
+        const existingField = existingFieldMap.get(desiredField.key);
+        
+        if (existingField) {
+          const existingType = existingField.type?.name || existingField.type;
+          const desiredType = desiredField.type;
+          
+          if (existingType !== desiredType) {
+            // Handle this type change separately
+            const result = await handleFieldTypeChange({ connections, logger }, existingDefinition, desiredDefinition, desiredField, existingType, desiredType);
+            
+            // Update existingDefinition for next iteration
+            existingDefinition = { ...existingDefinition, id: result.id };
+          }
+        }
+      }
+      
+      // After handling type changes, we might still have other operations to process
+      // But we'll return here since type changes were the priority
+      if (operations.length === 0) {
+        logger?.info?.(`All type changes handled separately for ${type}`);
+        return { type: existingDefinition.type, id: existingDefinition.id };
+      }
+    }
+    
+    // Log any fields that exist in Shopify but not in our definition (we're preserving them)
+    const preservedFields = [];
+    for (const [key] of existingFieldMap) {
+      if (!desiredFieldMap.has(key)) {
+        preservedFields.push(key);
+      }
+    }
+    
+    if (preservedFields.length > 0) {
+      logger?.info?.(`Preserving existing fields not in current definition: ${preservedFields.join(', ')}`);
+      logger?.info?.(`These fields will remain in Shopify to prevent data loss`);
+    }
+
+    updateInput.fieldDefinitions = operations;
+
+    // Only proceed if there are operations to perform
+    if (operations.length === 0) {
+      logger?.info?.(`No field changes needed for ${type} - all fields are up to date or preserved`);
+      return { type: existingDefinition.type, id: existingDefinition.id };
+    }
+
+    // Execute the update mutation with proper operation structure
+    const updateMutation = `#graphql
+      mutation UpdateMetaobjectDefinition($id: ID!, $definition: MetaobjectDefinitionUpdateInput!) {
+        metaobjectDefinitionUpdate(id: $id, definition: $definition) {
+          metaobjectDefinition { 
+            id 
+            type 
+            name 
+            fieldDefinitions {
+              key
+              name
+              type { name }
+            }
+          }
+          userErrors { field message code }
+        }
+      }
+    `;
+
+    const result = await connections.shopify.current.graphql(updateMutation, {
+      id: existingDefinition.id,
+      definition: updateInput
+    });
+
+    const userErrors = result?.metaobjectDefinitionUpdate?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      logger?.warn?.(`Cannot update metaobject definition for ${type} in place: ${JSON.stringify(userErrors)}`);
+      logger?.info?.(`Will preserve existing definition to prevent data loss`);
+      return { type: existingDefinition.type, id: existingDefinition.id };
+    }
+
+    const updated = result?.metaobjectDefinitionUpdate?.metaobjectDefinition;
+    if (updated?.id) {
+      const addedCount = operations.filter((op: any) => op.create).length;
+      const updatedCount = operations.filter((op: any) => op.update).length;
+      
+      logger?.info?.(`Successfully updated metaobject definition: ${type} (${updated.id})`);
+      logger?.info?.(`Changes: ${addedCount} fields added, ${updatedCount} fields updated`);
+      
+      if (preservedFields.length > 0) {
+        logger?.info?.(`${preservedFields.length} existing fields preserved to prevent data loss`);
+      }
+      return { type: updated.type, id: updated.id };
+    } else {
+      logger?.warn?.(`Update returned no id for ${type}`);
+      return { type: existingDefinition.type, id: existingDefinition.id };
+    }
+
+  } catch (error) {
+    logger?.warn?.(`Error updating metaobject definition for ${type}: ${String(error)}`);
+    logger?.info?.(`Will preserve existing definition to prevent data loss`);
+    return { type: existingDefinition.type, id: existingDefinition.id };
+  }
 }
 
 export async function ensureMetaobjectDefinition({ connections, logger }: any, definition: any) {
@@ -538,42 +839,24 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
     // We'll continue and try creating; Shopify will return a clear error if it exists
   }
 
-  // 2) Create if missing or recreate if differences found
+  // 2) Update existing definition if differences found, create if missing (additive-only approach)
   if (existingDefinition?.id) {
     if (compareMetaobjectDefinitions(existingDefinition, definition, logger)) {
       logger?.info?.(`Metaobject definition needs update: ${type}`);
       
-      // Delete the existing definition and recreate it with correct structure
+      // Always try to update in place with additive-only approach
+      logger?.info?.(`Attempting additive-only update for metaobject definition: ${type}`);
       try {
-        const deleteMutation = `#graphql
-          mutation DeleteMetaobjectDefinition($id: ID!) {
-            metaobjectDefinitionDelete(id: $id) {
-              deletedId
-              userErrors { field message code }
-            }
-          }
-        `;
-        
-        const deleteResult = await connections.shopify.current.graphql(deleteMutation, { 
-          id: existingDefinition.id 
-        });
-        
-        const deleteErrors = deleteResult?.metaobjectDefinitionDelete?.userErrors ?? [];
-        if (deleteErrors.length) {
-          logger?.error?.(`Errors deleting metaobject definition for ${type}: ${JSON.stringify(deleteErrors)}`);
-          return null;
+        const updateResult = await updateMetaobjectDefinition({ connections, logger }, existingDefinition, definition);
+        if (updateResult) {
+          return updateResult;
+        } else {
+          logger?.warn?.(`Failed to update metaobject definition for ${type}, but preserving existing definition to prevent data loss`);
+          return { type: existingDefinition.type, id: existingDefinition.id };
         }
-        
-        logger?.info?.(`Deleted outdated metaobject definition: ${type} (${existingDefinition.id})`);
-        
-        // Add a delay to allow Shopify to clean up associated metafield definitions
-        logger?.info?.(`Waiting 2 seconds for Shopify to clean up metafield definitions...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Fall through to create new definition below
       } catch (error) {
-        logger?.error?.(`Failed to delete metaobject definition for ${type}: ${String(error)}`);
-        return null;
+        logger?.error?.(`Error updating metaobject definition for ${type}: ${String(error)}, preserving existing definition`);
+        return { type: existingDefinition.type, id: existingDefinition.id };
       }
     } else {
       logger?.info?.(`Metaobject definition is up to date: ${type}`);
@@ -688,7 +971,10 @@ export async function ensureMetafieldDefinition({ connections, logger }: any, de
             key 
             name
             description
-            type
+            type {
+              name
+              category
+            }
             validations {
               name
               value
