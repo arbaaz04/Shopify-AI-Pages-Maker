@@ -52,9 +52,12 @@ const route: RouteHandler = async ({ request, reply, api, logger }) => {
  * Process the webhook data and update relevant models
  */
 async function processWebhookData(payload: any, logger: any, api: any) {
+  const webhookStartTime = new Date();
+  
   try {
-    logger.info("Processing MindPal webhook data" as any, { 
-      workflowRunId: payload?.workflow_run_id
+    logger.info("MindPal webhook received" as any, { 
+      workflowRunId: payload?.workflow_run_id,
+      receivedAt: webhookStartTime.toISOString()
     });
 
     // Extract generation job ID from workflow_run_input array
@@ -66,8 +69,9 @@ async function processWebhookData(payload: any, logger: any, api: any) {
         // Look for exact title match 'generation_job_id'
         if (input?.title === 'generation_job_id') {
           generationJobId = input.content;
-          logger.info("Found generation job ID" as any, {
-            generationJobId
+          logger.info("Found generation job ID in webhook" as any, {
+            generationJobId,
+            webhookReceivedAt: webhookStartTime.toISOString()
           });
           break;
         }
@@ -75,7 +79,7 @@ async function processWebhookData(payload: any, logger: any, api: any) {
 
       // If still not found, log all input titles for debugging
       if (!generationJobId) {
-        logger.warn("Generation job ID not found" as any, {
+        logger.warn("Generation job ID not found in webhook" as any, {
           availableTitles: payload.workflow_run_input.map((input: any) => input?.title)
         });
       }
@@ -135,9 +139,10 @@ async function processWebhookData(payload: any, logger: any, api: any) {
 
     if (generationJobId) {
       // Update the generation job status
+      let generationJob;
       try {
         // Include shop relationship in the selection to get shop information
-        const generationJob = await api.generationJob.findOne(generationJobId, {
+        generationJob = await api.generationJob.findOne(generationJobId, {
           select: {
             id: true,
             status: true,
@@ -145,32 +150,118 @@ async function processWebhookData(payload: any, logger: any, api: any) {
             shop: {
               id: true,
               myshopifyDomain: true
-            }
+            },
+            startedAt: true
           }
         });
+      } catch (findError: any) {
+        logger.error("Failed to lookup generation job" as any, { 
+          generationJobId,
+          error: findError.message,
+          errorCode: findError.code
+        });
+        // Don't proceed if we can't find the job
+        return;
+      }
         
-        if (generationJob) {
-          const shopDomain = generationJob.shop?.myshopifyDomain;
-          
-          logger.info("Found generation job, updating status" as any, { 
+      if (generationJob) {
+        const shopDomain = generationJob.shop?.myshopifyDomain;
+        const currentStatus = generationJob.status;
+        
+        logger.info("Found generation job for webhook" as any, { 
+          jobId: generationJobId,
+          currentStatus: currentStatus,
+          shopDomain: shopDomain,
+          jobStartedAt: generationJob.startedAt,
+          webhookReceivedAt: webhookStartTime.toISOString()
+        });
+
+        // Validate webhook data completeness before marking as completed
+        const hasValidContent = aiContent && typeof aiContent === 'object' && Object.keys(aiContent).length > 0;
+        
+        // Check current status and decide whether to update
+        if (currentStatus === 'failed') {
+          logger.warn("Generation job already marked as failed (likely due to timeout), not overwriting status" as any, {
             jobId: generationJobId,
-            currentStatus: generationJob.status,
+            shopDomain: shopDomain,
+            hasValidContent: hasValidContent,
+            jobStartedAt: generationJob.startedAt,
+            webhookReceivedAt: webhookStartTime.toISOString()
+          });
+          
+          // Still try to save the content if we have it, but don't change status
+          if (hasValidContent) {
+            logger.info("Attempting to save content despite failed status (late webhook arrival)" as any, {
+              jobId: generationJobId
+            });
+            // Content saving logic will be handled below
+          } else {
+            // No content and already failed, nothing more to do
+            return;
+          }
+        } else if (currentStatus === 'pending') {
+          logger.warn("Generation job still in pending state when webhook arrived" as any, {
+            jobId: generationJobId,
             shopDomain: shopDomain
           });
-
-          await api.generationJob.update(generationJobId, {
-            status: 'completed',
-            completedAt: new Date(),
-            errorMessage: null
+        } else if (currentStatus === 'completed') {
+          logger.info("Generation job already marked as completed" as any, {
+            jobId: generationJobId,
+            shopDomain: shopDomain
           });
-
-          // If we have AI content, create or update the AI content draft
-          if (aiContent) {
-            logger.info("Creating AI content draft with structured data" as any, { 
+        }
+        
+        // Only update status if not already failed
+        if (currentStatus !== 'failed') {
+          try {
+            if (hasValidContent) {
+              // We have valid content, mark as completed
+              await api.generationJob.update(generationJobId, {
+                status: 'completed',
+                completedAt: new Date(),
+                errorMessage: null
+              });
+              
+              logger.info("Updated generation job status to completed" as any, {
+                jobId: generationJobId,
+                previousStatus: currentStatus,
+                shopDomain: shopDomain
+              });
+            } else {
+              // No valid content in webhook, mark as failed
+              await api.generationJob.update(generationJobId, {
+                status: 'failed',
+                completedAt: new Date(),
+                errorMessage: 'Webhook received but no valid AI content found'
+              });
+              
+              logger.error("Marked generation job as failed due to missing content" as any, {
+                jobId: generationJobId,
+                previousStatus: currentStatus,
+                shopDomain: shopDomain
+              });
+              
+              // Don't proceed to create draft if no content
+              return;
+            }
+          } catch (updateError: any) {
+            logger.error("Failed to update generation job status" as any, {
               jobId: generationJobId,
-              productId: generationJob.productId,
+              error: updateError.message,
               shopDomain: shopDomain
             });
+            // Continue to try saving content even if status update fails
+          }
+        }
+
+        // If we have AI content, create or update the AI content draft
+        if (aiContent) {
+          logger.info("Creating AI content draft with structured data" as any, { 
+            jobId: generationJobId,
+            productId: generationJob.productId,
+            shopDomain: shopDomain,
+            contentSectionCount: Object.keys(aiContent).length
+          });
 
             try {
               // Check if draft already exists for this generation job
@@ -254,25 +345,23 @@ async function processWebhookData(payload: any, logger: any, api: any) {
                   });
                 }
               }
-            } catch (draftError: any) {
-              logger.error("Error creating/updating AI content draft" as any, {
-                error: draftError.message,
-                generationJobId,
-                shopDomain: shopDomain
-              });
-            }
-          } else {
-            logger.warn("No AI content found in workflow output" as any, {
+          } catch (draftError: any) {
+            logger.error("Error creating/updating AI content draft" as any, {
+              error: draftError.message,
+              generationJobId,
               shopDomain: shopDomain
             });
           }
         } else {
-          logger.error("Generation job not found" as any, { generationJobId });
+          logger.warn("No AI content found in workflow output" as any, {
+            shopDomain: shopDomain,
+            jobId: generationJobId
+          });
         }
-      } catch (error: any) {
-        logger.error("Error updating generation job" as any, { 
-          error: error.message,
-          generationJobId
+      } else {
+        logger.error("Generation job not found by ID" as any, { 
+          generationJobId,
+          webhookReceivedAt: webhookStartTime.toISOString()
         });
       }
     } else {

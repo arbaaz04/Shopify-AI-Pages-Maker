@@ -10,6 +10,10 @@ export const params = {
   productUrl: { type: "string" }
 };
 
+/**
+ * Note: This action returns immediately after sending the request to MindPal.
+ * Timeout handling for stale generation jobs is managed by the scheduled `checkStaleGenerationJobs` action.
+ */
 export async function run({ params, logger, connections, session, api }: any) {
   const { productId, productUrl } = params;
   
@@ -23,6 +27,8 @@ export async function run({ params, logger, connections, session, api }: any) {
 
   // Ensure we have the full GID format
   const fullProductGid = productId.startsWith('gid://shopify/Product/') ? productId : `gid://shopify/Product/${productId}`;
+
+  let generationJob: any = null;
 
   try {
     const shopify = connections.shopify?.current;
@@ -122,7 +128,7 @@ export async function run({ params, logger, connections, session, api }: any) {
     logger?.info(`Found shop with ID: ${shop.id}, domain: ${shop.domain}, myshopifyDomain: ${shop.myshopifyDomain}`);
 
     // Create a generation job to track this request (using numeric shop ID)
-    const generationJob = await api.generationJob.create({
+    generationJob = await api.generationJob.create({
       productId: fullProductGid.replace('gid://shopify/Product/', ''), // Store numeric product ID
       status: "in_progress",
       startedAt: new Date(),
@@ -200,13 +206,36 @@ export async function run({ params, logger, connections, session, api }: any) {
       status: mindpalResult.status 
     });
 
+    // Action will now wait for the webhook to arrive within the 30-minute timeout
+    // If timeout occurs, Gadget will automatically call the catch block below
+    // which will mark the job as failed
+
     return {
       success: true,
-      message: "Your request has been sent. Response will be available soon."
+      message: "Your request has been sent. Response will be available soon.",
+      generationJobId: generationJob.id
     };
 
   } catch (error: any) {
-    logger?.error("Error in generateAiContentFromUrl", { error: error.message });
+    logger?.error("Error in generateAiContentFromUrl", { error: error.message, stack: error.stack });
+    
+    // Update the generation job to failed status if it was created
+    if (generationJob?.id) {
+      try {
+        await api.generationJob.update(generationJob.id, {
+          status: "failed",
+          errorMessage: error.message || "An error occurred while generating AI content from URL",
+          completedAt: new Date()
+        });
+        logger?.info(`Updated generation job ${generationJob.id} to failed status`);
+      } catch (updateError: any) {
+        logger?.error("Failed to update generation job status", { 
+          jobId: generationJob.id,
+          error: updateError.message 
+        });
+      }
+    }
+    
     throw error;
   }
 }
