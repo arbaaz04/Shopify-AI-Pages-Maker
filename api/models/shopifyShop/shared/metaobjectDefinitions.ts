@@ -82,7 +82,7 @@ export const METAOBJECT_DEFINITIONS: any[] = [
     access: { storefront: "PUBLIC_READ" },
     capabilities: { publishable: { enabled: true } },
     fieldDefinitions: [
-      { key: "3_steps_headline", name: "3 Steps Headline", type: "single_line_text_field" },
+      { key: "three_steps_headline", name: "Three Steps Headline", type: "single_line_text_field" },
       { key: "step_1_image", name: "Step 1 Image", type: "file_reference" },
       { key: "step_1_headline", name: "Step 1 Headline", type: "single_line_text_field" },
       { key: "step_1_description", name: "Step 1 Description", type: "multi_line_text_field" },

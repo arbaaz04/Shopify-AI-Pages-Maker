@@ -7,6 +7,59 @@
 import { setupMetaobjectsAndMetafields } from "../models/shopifyShop/shared/metaobjectDefinitions";
 import { transformContent } from "../shared/contentTransformation";
 
+/**
+ * Exponential backoff retry helper
+ * Retries an async operation with exponential delays between attempts
+ */
+async function withExponentialBackoff<T>(
+  operation: () => Promise<T>,
+  options: {
+    maxRetries?: number;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+    operationName?: string;
+    logger?: any;
+  } = {}
+): Promise<T> {
+  const {
+    maxRetries = 3,
+    initialDelayMs = 1000,
+    maxDelayMs = 30000,
+    operationName = 'operation',
+    logger
+  } = options;
+  
+  let lastError: Error | null = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      const isTimeout = error?.message?.toLowerCase().includes('timeout');
+      const isRateLimit = error?.message?.toLowerCase().includes('rate') || error?.message?.toLowerCase().includes('throttl');
+      
+      // Log the failure
+      const errorType = isTimeout ? 'TIMEOUT' : isRateLimit ? 'RATE_LIMIT' : 'ERROR';
+      console.error(`[${errorType}] ${operationName} failed (attempt ${attempt}/${maxRetries}):`, error?.message);
+      logger?.warn(`[${errorType}] ${operationName} failed (attempt ${attempt}/${maxRetries}):`, { error: error?.message });
+      
+      if (attempt < maxRetries) {
+        // Calculate delay with exponential backoff: 1s, 2s, 4s, 8s...
+        const delay = Math.min(initialDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+        console.log(`[RETRY] Retrying ${operationName} in ${delay}ms...`);
+        logger?.info(`[RETRY] Retrying ${operationName} in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  // All retries exhausted
+  console.error(`[FAILED] ${operationName} failed after ${maxRetries} attempts`);
+  logger?.error(`[FAILED] ${operationName} failed after ${maxRetries} attempts`, { lastError: lastError?.message });
+  throw lastError;
+}
+
 export const params = {
   draftId: { type: "string" },
   productId: { type: "string" }
@@ -45,25 +98,9 @@ export async function run({ params, logger, api, connections }: any) {
     throw new Error("Shopify connection not available");
   }
 
-  // Ensure metaobject definitions are up-to-date before creating metaobjects
-  logger?.info("Checking/updating metaobject definitions before creating metaobjects...");
-  try {
-    // Get the shop record for the current session
-    const shop = await api.shopifyShop.findFirst({
-      filter: { id: { equals: connections.shopify.currentShopId } }
-    });
-
-    if (shop) {
-      await setupMetaobjectsAndMetafields({ connections, logger, api, record: shop });
-      logger?.info("Metaobject definitions verified/updated successfully");
-    } else {
-      logger?.warn("Shop record not found, skipping metaobject definitions setup");
-    }
-  } catch (error) {
-    logger?.error("Failed to setup metaobject definitions", { error: String(error) });
-    // Continue with metaobject creation even if definitions setup fails
-    logger?.info("Continuing with metaobject creation despite definitions setup failure");
-  }
+  // Skip metaobject definition setup - should already be done during shop install/update
+  // This saves significant time during publish
+  logger?.info("Skipping metaobject definition setup - using existing definitions");
 
   logger?.info(`Creating Shopify metaobjects and metafields for product ${productId} from draft ${draftId}`);
   logger?.info("Content source and structure", { 
@@ -96,6 +133,9 @@ export async function run({ params, logger, api, connections }: any) {
     
     const createdMetaobjects: Record<string, string> = {};
     
+    // Track all URL->GID conversions to update the draft later
+    const allUrlToGidMappings: Record<string, Record<string, string>> = {};
+    
     // Define all section types we need to process
     const sectionTypes = [
       'dynamic_buy_box', 'problem_symptoms', 'product_introduction', 'three_steps',
@@ -127,11 +167,21 @@ export async function run({ params, logger, api, connections }: any) {
         
         // Add try-catch around field processing
         let processedFields;
+        let urlToGidMapping: Record<string, string> = {};
         try {
           logger?.info(`Starting field processing for ${sectionType}`);
-          processedFields = await processImageFields(sectionData, shopify, logger);
+          const result = await processImageFields(sectionData, shopify, logger);
+          processedFields = result.fields;
+          urlToGidMapping = result.urlToGidMapping;
+          
+          // Store the URL->GID mapping for this section
+          if (Object.keys(urlToGidMapping).length > 0) {
+            allUrlToGidMappings[sectionType] = urlToGidMapping;
+          }
+          
           logger?.info(`Completed field processing for ${sectionType}`, { 
-            fieldCount: processedFields.length 
+            fieldCount: processedFields.length,
+            urlsConverted: Object.keys(urlToGidMapping).length
           });
         } catch (fieldProcessingError: any) {
           logger?.error(`Error during field processing for ${sectionType}`, {
@@ -171,7 +221,7 @@ export async function run({ params, logger, api, connections }: any) {
       logger?.info(`three_steps metaobject not found in AI content, creating with default content`);
       
       const defaultThreeStepsData = {
-        "3_steps_headline": "Experience Complete Protection In 3 Easy Steps",
+        "three_steps_headline": "Experience Complete Protection In 3 Easy Steps",
         step_1_headline: "Step 1",
         step_1_description: "First step description",
         step_2_headline: "Step 2", 
@@ -181,7 +231,8 @@ export async function run({ params, logger, api, connections }: any) {
       };
       
       try {
-        const processedFields = await processImageFields(defaultThreeStepsData, shopify, logger);
+        const result = await processImageFields(defaultThreeStepsData, shopify, logger);
+        const processedFields = result.fields;
         
         if (processedFields && processedFields.length > 0) {
           const metaobjectId = await createNestedMetaobject(shopify, 'three_steps', processedFields, logger);
@@ -217,6 +268,36 @@ export async function run({ params, logger, api, connections }: any) {
     // STEP 5: Set the product metafield to reference the published master metaobject
     const metafield = await setProductMetafield(shopify, productId, masterMetaobjectId, logger);
     
+    // STEP 6: Update the draft's processedContent with new GIDs so previews work correctly
+    if (Object.keys(allUrlToGidMappings).length > 0) {
+      logger?.info(`Updating draft with ${Object.keys(allUrlToGidMappings).length} sections containing URL->GID conversions`);
+      
+      // Create updated content with GIDs replacing URLs
+      const updatedProcessedContent = { ...processedContent };
+      
+      for (const [sectionType, urlToGid] of Object.entries(allUrlToGidMappings)) {
+        if (updatedProcessedContent[sectionType] && typeof updatedProcessedContent[sectionType] === 'object') {
+          const updatedSection = { ...updatedProcessedContent[sectionType] };
+          
+          for (const [fieldKey, gid] of Object.entries(urlToGid)) {
+            if (updatedSection[fieldKey]) {
+              logger?.info(`Updating ${sectionType}.${fieldKey}: URL -> ${gid}`);
+              updatedSection[fieldKey] = gid;
+            }
+          }
+          
+          updatedProcessedContent[sectionType] = updatedSection;
+        }
+      }
+      
+      // Save the updated content back to the draft
+      await api.aiContentDraft.update(draftId, {
+        processedContent: updatedProcessedContent
+      });
+      
+      logger?.info(`Draft ${draftId} updated with converted GIDs`);
+    }
+    
     // Note: three_steps is now included as a field in the master_sales_page metaobject
     // No separate three_steps product metafield needed
     
@@ -243,10 +324,11 @@ export async function run({ params, logger, api, connections }: any) {
 
 /**
  * Process image fields by converting URLs to Shopify file references
- * Also ensures proper field value formatting for Shopify metaobjects
+ * Uses batch upload for efficiency to avoid timeouts
  */
 async function processImageFields(sectionData: any, shopify: any, logger: any) {
-  const processedFields = [];
+  const processedFields: { key: string; value: string }[] = [];
+  const urlsToUpload: { key: string; url: string }[] = [];
   
   logger?.info(`Starting processImageFields`, {
     sectionDataKeys: Object.keys(sectionData),
@@ -288,61 +370,90 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
     'as_seen_in_logos_image'
   ];
   
+  // First pass: categorize fields and collect URLs that need uploading
   for (const [key, value] of Object.entries(sectionData)) {
-    logger?.info(`Processing field: ${key}`, {
-      valueType: typeof value,
-      valueLength: String(value).length,
-      isFileReferenceField: fileReferenceFields.includes(key),
-      startsWithHttp: String(value).startsWith('http')
-    });
-    
     // Ensure we have a valid value
-    if (value === null || value === undefined) {
-      logger?.info(`Skipping ${key} - null/undefined value`);
-      continue; // Skip null/undefined values
-    }
+    if (value === null || value === undefined) continue;
     
-    // Convert value to string and trim whitespace
     const stringValue = String(value).trim();
+    if (stringValue === '') continue;
     
-    if (stringValue === '') {
-      logger?.info(`Skipping ${key} - empty string value`);
-      continue; // Skip empty values
+    const isFileRefField = fileReferenceFields.includes(key);
+    
+    // Already a Shopify file ID - use directly
+    if (stringValue.startsWith('gid://shopify/')) {
+      if (isFileRefField) {
+        processedFields.push({ key, value: stringValue });
+      } else {
+        processedFields.push({ key, value: stringValue });
+      }
+      continue;
     }
     
-    if (stringValue.startsWith('http') && (isImageUrl(stringValue) || fileReferenceFields.includes(key))) {
-      // Check for placeholder or obviously invalid URLs
+    // Shopify CDN URL - needs to be uploaded to get GID for file_reference fields
+    if (stringValue.includes('cdn.shopify.com')) {
+      if (isFileRefField) {
+        // Queue for upload to get GID
+        urlsToUpload.push({ key, url: stringValue });
+      } else {
+        // Use CDN URL directly for non-file-reference fields
+        processedFields.push({ key, value: stringValue });
+      }
+      continue;
+    }
+    
+    // External HTTP URL
+    if (stringValue.startsWith('http')) {
+      // Skip placeholder URLs
       if (stringValue.includes('placeholder') || 
           stringValue.includes('example.com') || 
           stringValue.includes('lorem') ||
           stringValue.toLowerCase().includes('temp')) {
-        logger?.info(`Skipping placeholder/invalid URL for ${key}: ${stringValue}`);
         continue;
       }
       
-      // This is an image URL or a field that expects file references
-      logger?.info(`Processing image/file field: ${key}`, { url: stringValue });
-      
-      // For file reference fields, we MUST have a valid Shopify file ID
-      // For other image fields, we can fall back to the URL if file creation fails
-      const isRequiredFileReference = fileReferenceFields.includes(key);
+      if (isFileRefField || isImageUrl(stringValue)) {
+        // Queue for upload
+        urlsToUpload.push({ key, url: stringValue });
+      } else {
+        // Use URL directly for non-image fields
+        processedFields.push({ key, value: stringValue });
+      }
+      continue;
+    }
+    
+    // Regular text field - clean and add
+    const processedValue = stringValue
+      .replace(/[\x00-\x1F\x7F]/g, '')
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"');
+    
+    processedFields.push({ key, value: processedValue });
+  }
+  
+  // Track URL to GID conversions for updating the draft later
+  const urlToGidMapping: Record<string, string> = {};
+  
+  // Batch upload URLs to Shopify (up to 10 at a time per Shopify's limit)
+  if (urlsToUpload.length > 0) {
+    logger?.info(`Batch uploading ${urlsToUpload.length} images to Shopify`);
+    
+    const BATCH_SIZE = 10;
+    const uploadResults = new Map<string, string>();
+    
+    for (let i = 0; i < urlsToUpload.length; i += BATCH_SIZE) {
+      const batch = urlsToUpload.slice(i, i + BATCH_SIZE);
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(urlsToUpload.length / BATCH_SIZE);
+      logger?.info(`Processing batch ${batchNum}/${totalBatches}`);
       
       try {
-        // Validate that the URL is accessible (basic check)
-        if (!stringValue.startsWith('https://') && !stringValue.startsWith('http://')) {
-          throw new Error(`Invalid URL format: ${stringValue}`);
-        }
-        
         const fileCreateMutation = `#graphql
           mutation FileCreate($files: [FileCreateInput!]!) {
             fileCreate(files: $files) {
               files {
                 id
-                ... on MediaImage {
-                  image {
-                    url
-                  }
-                }
+                alt
               }
               userErrors {
                 field
@@ -352,101 +463,100 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
           }
         `;
         
-        logger?.info(`Creating file for ${key}`, { isRequired: isRequiredFileReference });
+        const filesInput = batch.map(item => ({
+          originalSource: item.url,
+          contentType: 'IMAGE' as const,
+          alt: item.key // Use field key as alt for identification
+        }));
         
-        // Add timeout to prevent hanging on external image downloads
-        const fileResult = await Promise.race([
-          shopify.graphql(fileCreateMutation, {
-            files: [{
-              originalSource: stringValue,
-              contentType: 'IMAGE'
-            }]
-          }),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('File creation timeout')), 30000) // 30 second timeout
-          )
-        ]);
-        
-        logger?.info(`File creation result for ${key}`, {
-          hasErrors: fileResult.fileCreate.userErrors.length > 0,
-          errorCount: fileResult.fileCreate.userErrors.length,
-          errors: fileResult.fileCreate.userErrors
-        });
+        // Use exponential backoff for batch uploads
+        const fileResult = await withExponentialBackoff(
+          async () => {
+            const result = await Promise.race([
+              shopify.graphql(fileCreateMutation, { files: filesInput }),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Batch file creation timeout')), 45000)
+              )
+            ]) as any;
+            
+            // Check for user errors that might be retryable
+            if (result.fileCreate?.userErrors?.length > 0) {
+              const hasRetryableError = result.fileCreate.userErrors.some((e: any) => 
+                e.message?.toLowerCase().includes('throttl') ||
+                e.message?.toLowerCase().includes('rate') ||
+                e.message?.toLowerCase().includes('timeout')
+              );
+              if (hasRetryableError) {
+                throw new Error(`Retryable error: ${JSON.stringify(result.fileCreate.userErrors)}`);
+              }
+            }
+            
+            return result;
+          },
+          {
+            maxRetries: 3,
+            initialDelayMs: 2000,
+            maxDelayMs: 15000,
+            operationName: `batch upload ${batchNum}/${totalBatches} (${batch.map(b => b.key).join(', ')})`,
+            logger
+          }
+        );
         
         if (fileResult.fileCreate.userErrors.length > 0) {
-          logger?.warn(`Failed to create file for ${key}: ${JSON.stringify(fileResult.fileCreate.userErrors)}`);
-          
-          if (isRequiredFileReference) {
-            // For file reference fields, skip if file creation fails (they need valid file IDs)
-            logger?.info(`Skipping required file reference field ${key} due to file creation failure`);
-            continue;
-          } else {
-            // For other image fields, we can use the original URL as fallback
-            processedFields.push({ key, value: stringValue });
-            logger?.info(`Using original URL as fallback for ${key}`);
-          }
-        } else if (fileResult.fileCreate.files && fileResult.fileCreate.files.length > 0) {
-          const fileId = fileResult.fileCreate.files[0].id;
-          
-          // Validate that we have a proper Shopify file ID
-          if (fileId && fileId.startsWith('gid://shopify/')) {
-            processedFields.push({ key, value: fileId });
-            logger?.info(`Successfully converted image ${key} to Shopify file: ${fileId}`);
-          } else {
-            logger?.warn(`Invalid file ID returned for ${key}: ${fileId}`);
-            if (isRequiredFileReference) {
-              logger?.info(`Skipping required file reference field ${key} due to invalid file ID`);
-              continue;
-            } else {
-              processedFields.push({ key, value: stringValue });
-              logger?.info(`Using original URL as fallback for ${key} due to invalid file ID`);
-            }
-          }
-        } else {
-          logger?.warn(`No file returned for ${key}, using original URL`);
-          if (isRequiredFileReference) {
-            logger?.info(`Skipping required file reference field ${key} - no file returned`);
-            continue;
-          } else {
-            processedFields.push({ key, value: stringValue });
-          }
+          logger?.warn(`Batch upload had errors:`, fileResult.fileCreate.userErrors);
+          console.warn(`[WARN] Batch ${batchNum} upload had errors:`, fileResult.fileCreate.userErrors);
         }
-      } catch (error: any) {
-        logger?.warn(`Error processing image ${key}:`, { 
-          error: error?.message || String(error),
-          isTimeout: error?.message === 'File creation timeout'
-        });
         
-        if (isRequiredFileReference) {
-          // For file reference fields, skip if processing fails
-          logger?.info(`Skipping required file reference field ${key} due to processing error`);
-          continue;
-        } else {
-          // For other fields, use original URL as fallback
-          processedFields.push({ key, value: stringValue });
-          logger?.info(`Using original URL as fallback for ${key} after error`);
+        // Map results back to field keys using alt text
+        if (fileResult.fileCreate.files) {
+          fileResult.fileCreate.files.forEach((file: any, index: number) => {
+            if (file?.id && file.id.startsWith('gid://shopify/')) {
+              const fieldKey = batch[index].key;
+              uploadResults.set(fieldKey, file.id);
+              logger?.info(`Uploaded ${fieldKey}: ${file.id}`);
+            }
+          });
         }
+        
+        // Small delay between batches to avoid rate limiting
+        if (i + BATCH_SIZE < urlsToUpload.length) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+      } catch (error: any) {
+        // Log failed batch with field names for debugging
+        const failedFields = batch.map(b => b.key).join(', ');
+        console.error(`[FAILED] Batch ${batchNum} upload failed after retries. Fields: ${failedFields}. Error:`, error?.message);
+        logger?.error(`Batch ${batchNum} upload failed after retries:`, { 
+          error: error?.message,
+          failedFields,
+          urls: batch.map(b => b.url.substring(0, 50))
+        });
+        // Continue with next batch even if this one fails
       }
-    } else {
-      // Handle regular text fields - ensure clean string without special characters that could break GraphQL
-      const processedValue = stringValue
-        .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
-        .replace(/\\/g, '\\\\')          // Escape backslashes
-        .replace(/"/g, '\\"');           // Escape quotes
-      
-      processedFields.push({ key, value: processedValue });
+    }
+    
+    // Add successfully uploaded files to processed fields
+    for (const { key, url } of urlsToUpload) {
+      const fileId = uploadResults.get(key);
+      if (fileId) {
+        processedFields.push({ key, value: fileId });
+        // Track the URL -> GID conversion
+        urlToGidMapping[key] = fileId;
+        logger?.info(`Mapped ${key}: ${url.substring(0, 50)}... -> ${fileId}`);
+      } else {
+        logger?.warn(`No GID obtained for ${key}, skipping field`);
+      }
     }
   }
   
   logger?.info(`Processed ${processedFields.length} fields for metaobject`, {
-    fieldKeys: processedFields.map(f => f.key),
-    sampleValues: processedFields.slice(0, 3).map(f => ({ [f.key]: f.value.substring(0, 100) + (f.value.length > 100 ? '...' : '') }))
+    fieldKeys: processedFields.map(f => f.key)
   });
   
   // Final validation: ensure all file reference fields have valid Shopify file IDs
   const validatedFields = processedFields.filter(field => {
     if (fileReferenceFields.includes(field.key)) {
-      // This is a file reference field - it MUST have a valid Shopify file ID
       const isValidFileId = field.value && field.value.startsWith('gid://shopify/');
       if (!isValidFileId) {
         logger?.warn(`Removing invalid file reference field ${field.key}: ${field.value}`);
@@ -456,11 +566,11 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
     return true;
   });
   
-  if (validatedFields.length !== processedFields.length) {
-    logger?.info(`Filtered out ${processedFields.length - validatedFields.length} invalid file reference fields`);
-  }
-  
-  return validatedFields;
+  // Return both the fields and the URL->GID mapping
+  return {
+    fields: validatedFields,
+    urlToGidMapping: urlToGidMapping || {}
+  };
 }
 
 function isImageUrl(url: string): boolean {
@@ -497,12 +607,44 @@ async function createNestedMetaobject(shopify: any, sectionType: string, process
     }
   `;
   
-  const result = await shopify.graphql(mutation, {
-    metaobject: {
-      type: sectionType,
-      fields: processedFields
+  // Use exponential backoff for metaobject creation
+  const result = await withExponentialBackoff(
+    async () => {
+      const res = await Promise.race([
+        shopify.graphql(mutation, {
+          metaobject: {
+            type: sectionType,
+            fields: processedFields
+          }
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Metaobject creation timeout')), 30000)
+        )
+      ]) as any;
+      
+      // Check for retryable errors
+      if (res.metaobjectCreate?.userErrors?.length > 0) {
+        const hasRetryableError = res.metaobjectCreate.userErrors.some((e: any) => 
+          e.message?.toLowerCase().includes('throttl') ||
+          e.message?.toLowerCase().includes('rate') ||
+          e.message?.toLowerCase().includes('timeout') ||
+          e.message?.toLowerCase().includes('busy')
+        );
+        if (hasRetryableError) {
+          throw new Error(`Retryable error: ${JSON.stringify(res.metaobjectCreate.userErrors)}`);
+        }
+      }
+      
+      return res;
+    },
+    {
+      maxRetries: 3,
+      initialDelayMs: 1500,
+      maxDelayMs: 10000,
+      operationName: `create metaobject ${sectionType}`,
+      logger
     }
-  });
+  );
   
   if (result.metaobjectCreate.userErrors.length > 0) {
     logger?.error(`Failed to create ${sectionType}`, { 
@@ -548,16 +690,48 @@ async function publishMetaobject(shopify: any, metaobjectId: string, sectionType
     }
   `;
   
-  const result = await shopify.graphql(mutation, {
-    id: metaobjectId,
-    metaobject: {
-      capabilities: {
-        publishable: {
-          status: "ACTIVE"
+  // Use exponential backoff for publishing
+  const result = await withExponentialBackoff(
+    async () => {
+      const res = await Promise.race([
+        shopify.graphql(mutation, {
+          id: metaobjectId,
+          metaobject: {
+            capabilities: {
+              publishable: {
+                status: "ACTIVE"
+              }
+            }
+          }
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Metaobject publish timeout')), 30000)
+        )
+      ]) as any;
+      
+      // Check for retryable errors
+      if (res.metaobjectUpdate?.userErrors?.length > 0) {
+        const hasRetryableError = res.metaobjectUpdate.userErrors.some((e: any) => 
+          e.message?.toLowerCase().includes('throttl') ||
+          e.message?.toLowerCase().includes('rate') ||
+          e.message?.toLowerCase().includes('timeout') ||
+          e.message?.toLowerCase().includes('busy')
+        );
+        if (hasRetryableError) {
+          throw new Error(`Retryable error: ${JSON.stringify(res.metaobjectUpdate.userErrors)}`);
         }
       }
+      
+      return res;
+    },
+    {
+      maxRetries: 3,
+      initialDelayMs: 1000,
+      maxDelayMs: 8000,
+      operationName: `publish metaobject ${sectionType}`,
+      logger
     }
-  });
+  );
   
   if (result.metaobjectUpdate.userErrors.length > 0) {
     logger?.error(`Failed to publish ${sectionType}`, { 
@@ -619,12 +793,44 @@ async function createMasterMetaobject(shopify: any, nestedMetaobjectIds: Record<
     }
   `;
   
-  const result = await shopify.graphql(mutation, {
-    metaobject: {
-      type: 'master_sales_page',
-      fields: masterFields
+  // Use exponential backoff for master metaobject creation
+  const result = await withExponentialBackoff(
+    async () => {
+      const res = await Promise.race([
+        shopify.graphql(mutation, {
+          metaobject: {
+            type: 'master_sales_page',
+            fields: masterFields
+          }
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Master metaobject creation timeout')), 30000)
+        )
+      ]) as any;
+      
+      // Check for retryable errors
+      if (res.metaobjectCreate?.userErrors?.length > 0) {
+        const hasRetryableError = res.metaobjectCreate.userErrors.some((e: any) => 
+          e.message?.toLowerCase().includes('throttl') ||
+          e.message?.toLowerCase().includes('rate') ||
+          e.message?.toLowerCase().includes('timeout') ||
+          e.message?.toLowerCase().includes('busy')
+        );
+        if (hasRetryableError) {
+          throw new Error(`Retryable error: ${JSON.stringify(res.metaobjectCreate.userErrors)}`);
+        }
+      }
+      
+      return res;
+    },
+    {
+      maxRetries: 3,
+      initialDelayMs: 1500,
+      maxDelayMs: 10000,
+      operationName: 'create master_sales_page metaobject',
+      logger
     }
-  });
+  );
   
   if (result.metaobjectCreate.userErrors.length > 0) {
     logger?.error(`Failed to create master sales page`, { 
@@ -671,17 +877,49 @@ async function setProductMetafield(shopify: any, productId: string, metaobjectId
     }
   `;
   
-  const result = await shopify.graphql(mutation, {
-    metafields: [
-      {
-        ownerId: `gid://shopify/Product/${productId}`,
-        namespace: "custom",
-        key: customKey,
-        type: "metaobject_reference",
-        value: metaobjectId
+  // Use exponential backoff for setting product metafield
+  const result = await withExponentialBackoff(
+    async () => {
+      const res = await Promise.race([
+        shopify.graphql(mutation, {
+          metafields: [
+            {
+              ownerId: `gid://shopify/Product/${productId}`,
+              namespace: "custom",
+              key: customKey,
+              type: "metaobject_reference",
+              value: metaobjectId
+            }
+          ]
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Set product metafield timeout')), 30000)
+        )
+      ]) as any;
+      
+      // Check for retryable errors
+      if (res.metafieldsSet?.userErrors?.length > 0) {
+        const hasRetryableError = res.metafieldsSet.userErrors.some((e: any) => 
+          e.message?.toLowerCase().includes('throttl') ||
+          e.message?.toLowerCase().includes('rate') ||
+          e.message?.toLowerCase().includes('timeout') ||
+          e.message?.toLowerCase().includes('busy')
+        );
+        if (hasRetryableError) {
+          throw new Error(`Retryable error: ${JSON.stringify(res.metafieldsSet.userErrors)}`);
+        }
       }
-    ]
-  });
+      
+      return res;
+    },
+    {
+      maxRetries: 3,
+      initialDelayMs: 1000,
+      maxDelayMs: 8000,
+      operationName: `set product metafield ${customKey}`,
+      logger
+    }
+  );
   
   logger?.info(`Metafield set result:`, { 
     userErrors: result.metafieldsSet?.userErrors,

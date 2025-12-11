@@ -1,4 +1,4 @@
-import {
+﻿import {
   Page,
   Card,
   Text,
@@ -11,14 +11,22 @@ import {
   Banner,
   Spinner,
   InlineGrid,
-  useBreakpoints
+  useBreakpoints,
+  InlineStack,
+  Thumbnail,
+  Select
 } from "@shopify/polaris";
 import { useFindOne, useAction, useGlobalAction } from "@gadgetinc/react";
 import { api } from "../api";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "@remix-run/react";
 import { NavMenu } from "../components/NavMenu";
 import { useAppBridge } from "@shopify/app-bridge-react";
+import { EditorLayout } from "../components/editor/EditorLayout";
+import { StickyHeader } from "../components/editor/StickyHeader";
+import { SideNavigation } from "../components/editor/SideNavigation";
+import { CollapsibleSection } from "../components/editor/CollapsibleSection";
+import { ImageUploadField } from "../components/editor/ImageUploadField";
 
 // Define the structure of AI content sections based on exact MindPal JSON structure
 const CONTENT_SECTIONS = {
@@ -87,7 +95,7 @@ const CONTENT_SECTIONS = {
   "3 Steps": {
     description: "Simple step-by-step guide showing how to use your product",
     fields: [
-      "3_steps_headline",
+      "three_steps_headline",
       "step_1_image",
       "step_1_headline",
       "step_1_description",
@@ -334,7 +342,6 @@ function transformEditorContent(content: Record<string, any>): Record<string, an
     if (transformed[originalField]) {
       transformed[mappedField] = transformed[originalField];
       delete transformed[originalField];
-      console.log(`Mapped field: ${originalField} -> ${mappedField}`);
     }
   });
   
@@ -352,12 +359,6 @@ function checkForTransformations(original: Record<string, any>, transformed: Rec
   // If we have How_To fields in original but not in transformed, and we have maximize_results fields, transformation happened
   const hasHowToTransformation = howToFields.length > 0 && transformedFields.length > 0;
   
-  console.log('Transformation check:', {
-    originalHowToFields: howToFields.length,
-    transformedMaxFields: transformedFields.length,
-    hasTransformation: hasHowToTransformation
-  });
-  
   return hasHowToTransformation;
 }
 
@@ -367,12 +368,8 @@ export default function EditAiContent() {
   const { smUp } = useBreakpoints();
   const shopify = useAppBridge();
   
-  // Debug logging
-  console.log('ContentEditor loaded with draftId:', draftId);
-  
   // Early return if no draftId
   if (!draftId) {
-    console.log('No draftId provided');
     return (
       <>
         <NavMenu />
@@ -398,9 +395,77 @@ export default function EditAiContent() {
   // Action for fetching Shopify products
   const [{ data: productsData, error: productsError, fetching: isFetchingProducts }, getShopifyProducts] = useGlobalAction(api.getShopifyProducts);
   
+  // Action for uploading images
+  const [{ data: uploadData, error: uploadError, fetching: isUploadingImage }, uploadImageToShopify] = useGlobalAction(api.uploadImagesToShopify);
+  
   // State for publishing process
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishingStep, setPublishingStep] = useState<'idle' | 'uploading' | 'publishing'>('idle');
+  
+  // State for image uploads
+  const [uploadingFields, setUploadingFields] = useState<Record<string, boolean>>({});
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const [fetchingPreviews, setFetchingPreviews] = useState<Record<string, boolean>>({});
+  const [showingImageUpload, setShowingImageUpload] = useState<Record<string, boolean>>({});
+  const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  
+  // State for section navigation
+  const [selectedSection, setSelectedSection] = useState<string>("all");
+  
+  // State for collapsible sections (ALL COLLAPSED BY DEFAULT)
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    Object.keys(CONTENT_SECTIONS).forEach(key => {
+      initial[key] = true; // true = collapsed
+    });
+    return initial;
+  });
+  
+  // State for active section in sidebar
+  const [activeSection, setActiveSection] = useState<string | null>(null);
+  
+  // Accordion behavior: toggle section and close all others
+  const toggleSection = (sectionTitle: string) => {
+    setCollapsedSections(prev => {
+      const isCurrentlyCollapsed = prev[sectionTitle];
+      
+      // If opening this section, close all others (accordion behavior)
+      if (isCurrentlyCollapsed) {
+        const newState: Record<string, boolean> = {};
+        Object.keys(CONTENT_SECTIONS).forEach(key => {
+          newState[key] = key !== sectionTitle; // Close all except the one being opened
+        });
+        // Update active section to keep sidebar in sync
+        setActiveSection(sectionTitle);
+        return newState;
+      } else {
+        // If closing, just close this one
+        setActiveSection(null);
+        return {
+          ...prev,
+          [sectionTitle]: true
+        };
+      }
+    });
+  };
+  
+  // Handle section click from sidebar - scroll and expand (accordion style)
+  const handleSectionClick = useCallback((sectionKey: string) => {
+    // Close all sections except the clicked one (accordion behavior)
+    const newState: Record<string, boolean> = {};
+    Object.keys(CONTENT_SECTIONS).forEach(key => {
+      newState[key] = key !== sectionKey;
+    });
+    setCollapsedSections(newState);
+    
+    // Scroll to the section
+    setTimeout(() => {
+      const element = document.getElementById(`section-${sectionKey}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 50);
+  }, []);
   
   // Local state for editable content
   const [editedContent, setEditedContent] = useState<Record<string, any>>({});
@@ -420,8 +485,6 @@ export default function EditAiContent() {
   // Function to fetch product name from Shopify
   const fetchProductName = useCallback(async (productId: string) => {
     try {
-      console.log('Fetching product name for ID:', productId);
-      
       // Use the getShopifyProducts action to fetch products and find the specific one
       await (getShopifyProducts as any)({ first: 250, maxProducts: 1000 }); // Fetch up to 1000 products to find the one we need
       
@@ -434,9 +497,6 @@ export default function EditAiContent() {
   // Handle products data when it's fetched
   useEffect(() => {
     if (productsData?.products && Array.isArray(productsData.products) && draft?.productId) {
-      console.log('Processing products data:', productsData.products.length, 'products');
-      console.log('Looking for product ID:', draft.productId);
-      
       // Try to find the product by different ID formats
       let product = null;
       
@@ -461,11 +521,8 @@ export default function EditAiContent() {
       }
       
       if (product?.title) {
-        console.log('Found product:', product.title);
         setProductName(product.title);
       } else {
-        console.log('Product not found in results. Available products:', 
-          productsData.products.slice(0, 5).map((p: any) => ({ id: p.id, title: p.title })));
         setProductName(`Product ${draft.productId}`);
       }
     } else if (productsError) {
@@ -502,7 +559,6 @@ export default function EditAiContent() {
       
       // If transformations were applied, automatically save the transformed content
       if (hasTransformations) {
-        console.log('Transformations detected, automatically saving transformed content...');
         autoSaveTransformedContent(transformedContent);
       }
     }
@@ -512,15 +568,6 @@ export default function EditAiContent() {
       fetchProductName(draft.productId);
     }
   }, [draft, fetchProductName]);
-
-  // Show/hide save bar based on hasChanges using App Bridge API
-  useEffect(() => {
-    if (hasChanges) {
-      shopify.saveBar.show('content-save-bar');
-    } else {
-      shopify.saveBar.hide('content-save-bar');
-    }
-  }, [hasChanges, shopify]);
 
   // Manage save bar animation states
   useEffect(() => {
@@ -539,19 +586,391 @@ export default function EditAiContent() {
       return () => clearTimeout(timer);
     }
   }, [hasChanges, showSaveBar]);
+
+  // IntersectionObserver for tracking active section in viewport
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const sectionId = entry.target.getAttribute('data-section-id');
+            if (sectionId) {
+              setActiveSection(sectionId);
+            }
+          }
+        });
+      },
+      {
+        root: null,
+        rootMargin: '-80px 0px -60% 0px', // Adjust for header height and trigger earlier
+        threshold: 0
+      }
+    );
+
+    // Observe all section elements
+    const sectionElements = document.querySelectorAll('[data-section-id]');
+    sectionElements.forEach((el) => observer.observe(el));
+
+    return () => {
+      sectionElements.forEach((el) => observer.unobserve(el));
+    };
+  }, [editedContent]); // Re-run when sections change
   
   const handleContentChange = useCallback((field: string, value: string) => {
     setEditedContent(prev => ({ ...prev, [field]: value }));
     setHasChanges(true);
   }, []);
 
+  // Helper to check if a field is an image field
+  const isImageField = useCallback((fieldName: string) => {
+    return fieldName.includes('_image') || 
+           fieldName.includes('_icon') || 
+           fieldName.endsWith('_image') ||
+           fieldName.endsWith('_icon') ||
+           fieldName.includes('image_') ||
+           fieldName.includes('icon_');
+  }, []);
+
+  // Get section key for a field
+  const getSectionKeyForField = useCallback((fieldName: string) => {
+    // Map field names back to section keys
+    for (const [sectionTitle, sectionData] of Object.entries(CONTENT_SECTIONS)) {
+      if (sectionData.fields.includes(fieldName)) {
+        const sectionKeyMapping: Record<string, string> = {
+          "Dynamic Buy Box": "dynamic_buy_box",
+          "Problem Symptoms": "problem_symptoms", 
+          "Product Introduction": "product_introduction",
+          "3 Steps": "three_steps",
+          "CTA": "cta",
+          "Before/After Transformation": "before_after_transformation",
+          "Featured Reviews": "featured_reviews",
+          "Key Differences": "key_differences",
+          "Product Comparison": "product_comparison",
+          "Where to Use": "where_to_use",
+          "Who It's For": "who_its_for",
+          "Maximize Results": "maximize_results",
+          "Cost of Inaction": "cost_of_inaction",
+          "Choose Your Package": "choose_your_package",
+          "Guarantee": "guarantee",
+          "FAQ": "faq",
+          "Store Credibility": "store_credibility"
+        };
+        return sectionKeyMapping[sectionTitle] || sectionTitle.toLowerCase().replace(/\s+/g, '_');
+      }
+    }
+    return 'additional';
+  }, []);
+
+  // Handle file selection
+  const handleFileSelect = useCallback(async (fieldName: string, event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !draft?.id) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      shopify.toast.show('Please select an image file', { isError: true });
+      return;
+    }
+
+    // Validate file size (max 20MB)
+    if (file.size > 20 * 1024 * 1024) {
+      shopify.toast.show('Image size must be less than 20MB', { isError: true });
+      return;
+    }
+
+    const fieldKey = `${fieldName}_uploading`;
+    setUploadingFields(prev => ({ ...prev, [fieldKey]: true }));
+
+    try {
+      // Convert file to base64
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Remove data URL prefix
+          const base64 = result.split(',')[1];
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      // Get section key for this field
+      const sectionKey = getSectionKeyForField(fieldName);
+
+      // Upload to Shopify
+      const result = await uploadImageToShopify({
+        draftId: draft.id,
+        fieldKey: fieldName,
+        sectionKey: sectionKey,
+        fileData: base64Data,
+        fileName: file.name,
+        mimeType: file.type
+      } as any);
+
+
+
+      if (result.data?.success) {
+        // For local file uploads, backend stores GID and returns:
+        // - fileId: the GID (gid://shopify/MediaImage/...)
+        // - cdnUrl: the CDN URL if available for preview
+        const fileGid = result.data.fileId;
+        const cdnUrl = result.data.cdnUrl;
+        
+        // Store the GID in editedContent (what gets saved to DB)
+        setEditedContent(prev => ({ ...prev, [fieldName]: fileGid }));
+        
+        // For preview: use CDN URL if available, otherwise fetch via GID
+        if (cdnUrl && cdnUrl.startsWith('http')) {
+          setPreviewUrls(prev => ({ ...prev, [fieldName]: cdnUrl }));
+        } else if (fileGid && fileGid.startsWith('gid://shopify/')) {
+          fetchShopifyFilePreview(fieldName, fileGid);
+        }
+        
+        setHasChanges(true);
+        shopify.toast.show('Image uploaded successfully!');
+        
+        // Close the upload interface to show the preview
+        setShowingImageUpload(prev => ({ ...prev, [fieldName]: false }));
+      } else {
+        throw new Error(result.error?.message || 'Upload failed');
+      }
+
+    } catch (error: any) {
+      console.error('Image upload failed:', error);
+      shopify.toast.show(`Upload failed: ${error.message || 'Unknown error'}`, { isError: true });
+    } finally {
+      setUploadingFields(prev => ({ ...prev, [fieldKey]: false }));
+      // Reset file input
+      if (fileInputRefs.current[fieldName]) {
+        fileInputRefs.current[fieldName]!.value = '';
+      }
+    }
+  }, [draft?.id, uploadImageToShopify, getSectionKeyForField, shopify]);
+
+  // Trigger file input
+  const triggerFileInput = useCallback((fieldName: string) => {
+    fileInputRefs.current[fieldName]?.click();
+  }, []);
+
+  // Clear image field
+  const handleClearImage = useCallback((fieldName: string) => {
+    setEditedContent(prev => ({ ...prev, [fieldName]: '' }));
+    setHasChanges(true);
+  }, []);
+
+  // Track URLs currently being uploaded to prevent duplicates
+  const uploadingUrlsRef = useRef<Set<string>>(new Set());
+
+  // Upload image from URL to Shopify
+  const handleUrlUpload = useCallback(async (fieldName: string, imageUrl: string) => {
+    // Validate URL
+    if (!imageUrl || !imageUrl.startsWith('http') || !draft?.id) return;
+    
+    // Skip if it's already a Shopify CDN URL
+    if (imageUrl.includes('cdn.shopify.com')) return;
+    
+    // Skip invalid URLs (Google search pages, etc.)
+    if (imageUrl.includes('google.com/imgres') || 
+        imageUrl.includes('google.com/url') ||
+        imageUrl.includes('?imgurl=')) {
+      shopify.toast.show('Please use a direct image URL, not a Google search link', { isError: true });
+      return;
+    }
+    
+    // Prevent duplicate uploads for the same URL
+    const uploadKey = `${fieldName}:${imageUrl}`;
+    if (uploadingUrlsRef.current.has(uploadKey)) return;
+    uploadingUrlsRef.current.add(uploadKey);
+
+    const fieldKey = `${fieldName}_uploading`;
+    setUploadingFields(prev => ({ ...prev, [fieldKey]: true }));
+
+    try {
+      // Get section key for this field
+      const sectionKey = getSectionKeyForField(fieldName);
+
+      // Upload to Shopify using the URL
+      const result = await uploadImageToShopify({
+        draftId: draft.id,
+        fieldKey: fieldName,
+        sectionKey: sectionKey,
+        imageUrl: imageUrl // Pass URL instead of file data
+      } as any);
+
+      if (result.data?.success) {
+        // Backend returns imageUrl (CDN URL or GID) and fileId (always GID)
+        const storedValue = result.data.imageUrl || result.data.fileId;
+        
+        // Store what the backend stored
+        setEditedContent(prev => ({ ...prev, [fieldName]: storedValue }));
+        
+        // Handle preview based on what we got
+        if (storedValue.startsWith('gid://shopify/')) {
+          // It's a GID, fetch preview URL
+          fetchShopifyFilePreview(fieldName, storedValue);
+        } else if (storedValue.startsWith('http')) {
+          // It's a CDN URL, cache it directly for preview
+          setPreviewUrls(prev => ({ ...prev, [fieldName]: storedValue }));
+        }
+        
+        setHasChanges(true);
+        shopify.toast.show('Image uploaded to Shopify!');
+        
+        // Close the upload interface
+        setShowingImageUpload(prev => ({ ...prev, [fieldName]: false }));
+      } else {
+        throw new Error(result.error?.message || 'Upload failed');
+      }
+
+    } catch (error: any) {
+      shopify.toast.show(`Upload failed: ${error.message || 'Unknown error'}`, { isError: true });
+      // Don't keep the URL as fallback - let user try again
+    } finally {
+      setUploadingFields(prev => ({ ...prev, [fieldKey]: false }));
+      // Remove from tracking after a delay to prevent immediate re-upload
+      setTimeout(() => {
+        uploadingUrlsRef.current.delete(uploadKey);
+      }, 2000);
+    }
+  }, [draft?.id, uploadImageToShopify, getSectionKeyForField, shopify]);
+
+  // Get image preview URL
+  const getImagePreviewUrl = useCallback((fieldName: string, value: any) => {
+    if (!value) return null;
+    
+    // Now we only store strings - URLs or GIDs
+    if (typeof value === 'string') {
+      // If it's a Shopify file ID, check if we have cached preview
+      if (value.startsWith('gid://shopify/')) {
+        return previewUrls[fieldName] || null;
+      }
+      
+      // If it's a URL, show it directly
+      if (value.startsWith('http')) {
+        return value;
+      }
+    }
+    
+    // Fallback for any legacy object format
+    if (typeof value === 'object' && value?.url) {
+      return value.url.startsWith('http') ? value.url : previewUrls[fieldName] || null;
+    }
+    
+    return null;
+  }, [previewUrls]);
+
+  // Fetch preview URL for Shopify file ID
+  const fetchShopifyFilePreview = useCallback(async (fieldName: string, fileId: string) => {
+    if (!fileId.startsWith('gid://shopify/')) return;
+    if (previewUrls[fieldName]) return; // Already cached
+    if (fetchingPreviews[fieldName]) return; // Already fetching
+
+    setFetchingPreviews(prev => ({ ...prev, [fieldName]: true }));
+
+    try {
+      const query = `
+        query GetMediaImageById($id: ID!) {
+          node(id: $id) {
+            id
+            ... on MediaImage {
+              image {
+                url
+                originalSrc
+              }
+            }
+            ... on GenericFile {
+              url
+            }
+          }
+        }
+      `;
+
+      // Use Shopify App Bridge to make the query via our proxy route
+      const response = await fetch('/shopify-graphql', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query, variables: { id: fileId } })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      // The proxy returns the GraphQL response directly (not wrapped in data)
+      // So check both result.data?.node and result.node
+      const node = result.data?.node || result.node;
+      const imageUrl = node?.image?.url || node?.image?.originalSrc || node?.url;
+      
+      if (imageUrl) {
+        setPreviewUrls(prev => ({ ...prev, [fieldName]: imageUrl }));
+      }
+    } catch (error) {
+      console.error('Failed to fetch preview for', fieldName, ':', error);
+    } finally {
+      // Always clear fetching state
+      setFetchingPreviews(prev => {
+        const updated = { ...prev };
+        delete updated[fieldName];
+        return updated;
+      });
+    }
+  }, [previewUrls, fetchingPreviews]);
+
+  // Track which fields we've attempted to fetch (using ref to avoid re-renders)
+  const fetchAttempted = useRef<Set<string>>(new Set());
+
+  // Clear fetch tracking when draft changes
+  useEffect(() => {
+    if (draft?.id) {
+      fetchAttempted.current.clear();
+      setPreviewUrls({});
+      setFetchingPreviews({});
+    }
+  }, [draft?.id]);
+
+  // Effect to fetch previews for Shopify file IDs when content loads
+  useEffect(() => {
+    if (!draft?.id || Object.keys(editedContent).length === 0) return;
+    
+    Object.entries(editedContent).forEach(([fieldName, value]) => {
+      if (!isImageField(fieldName)) return;
+      
+      // Check if we already have a preview URL cached
+      if (previewUrls[fieldName]) return;
+      
+      // Now we only store strings - URLs or GIDs
+      if (typeof value !== 'string') return;
+      
+      // If it's already an HTTP URL (including Shopify CDN), cache it
+      if (value.startsWith('http')) {
+        setPreviewUrls(prev => {
+          if (prev[fieldName]) return prev;
+          return { ...prev, [fieldName]: value };
+        });
+        return;
+      }
+      
+      // If it's a GID, fetch the preview URL
+      if (value.startsWith('gid://shopify/')) {
+        const attemptKey = `${fieldName}:${value}`;
+        if (!fetchAttempted.current.has(attemptKey)) {
+          fetchAttempted.current.add(attemptKey);
+          fetchShopifyFilePreview(fieldName, value);
+        }
+      }
+    });
+  }, [draft?.id, editedContent, isImageField, fetchShopifyFilePreview, previewUrls]);
+
   // Auto-save transformed content when transformations are detected
   const autoSaveTransformedContent = useCallback(async (transformedContent: Record<string, any>) => {
     if (!draft?.id) return;
     
     try {
-      console.log('Auto-saving transformed content...');
-      
       // Restructure the transformed content the same way as manual save
       const restructuredContent: Record<string, any> = {};
       
@@ -604,7 +1023,6 @@ export default function EditAiContent() {
         processedContent: restructuredContent
       });
       
-      console.log('Auto-save completed successfully');
       // Auto-save completed silently
     } catch (error: any) {
       console.error('Auto-save failed:', error);
@@ -765,17 +1183,11 @@ export default function EditAiContent() {
       // Small delay to ensure database write is committed
       await new Promise(resolve => setTimeout(resolve, 100));
       
-      console.log('Calling populateProductMetafields with params:', {
-        draftId: draft.id,
-        productId: draft.productId
-      });
-      
       try {
-        const result = await populateProductMetafields({
+        await populateProductMetafields({
           draftId: draft.id,
           productId: draft.productId
         } as any);
-        console.log('populateProductMetafields result:', result);
       } catch (actionError) {
         console.error('populateProductMetafields error:', actionError);
         throw actionError;
@@ -910,122 +1322,297 @@ export default function EditAiContent() {
   // Helper function to get field value
   const getFieldValue = (fieldName: string) => {
     const value = editedContent[fieldName];
+    
+    // Handle structured image data
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      // For image fields, return the fileId or url
+      if (value.fileId) return String(value.fileId);
+      if (value.url) return String(value.url);
+    }
+    
     if (Array.isArray(value)) {
-      // Convert all array items to strings before joining
       return value.map(item => String(item || '')).join('\n');
     }
-    // Convert to string to ensure we always return a string
+    
     return String(value || '');
   };
+
+  // Prepare sections for sidebar
+  const sidebarSections = Object.keys(CONTENT_SECTIONS)
+    .filter(sectionTitle => {
+      const sectionData = CONTENT_SECTIONS[sectionTitle as keyof typeof CONTENT_SECTIONS];
+      return sectionData.fields.some((field: string) => editedContent[field]);
+    })
+    .map(sectionTitle => ({
+      key: sectionTitle,
+      title: sectionTitle
+    }));
 
   return (
     <>
       <NavMenu />
-      <Page 
-          title="Edit AI Content"
-          backAction={{
-            content: 'Back to Products',
-            onAction: handleBack
-          }}
-          primaryAction={{
-            content: publishingStep === 'uploading' ? 'Processing Images...' : 
-                    publishingStep === 'publishing' ? 'Creating Metaobjects...' :
-                    isPublishing || isPublishingAction ? 'Processing...' :
-                    'Upload Images & Publish',
-            onAction: handlePublish,
-            loading: isPublishing || isPublishingAction,
-            disabled: isPublishing || isPublishingAction || isUpdating || isDeleting
-          }}
-          secondaryActions={[
-            {
-              content: 'Revert to Original',
-              onAction: handleRevert,
-              disabled: !draft?.rawAiContent || isUpdating || isPublishing || isPublishingAction || isDeleting
-            },
-            {
-              content: 'Delete AI Content',
-              onAction: handleDelete,
-              destructive: true,
-              loading: isDeleting,
-              disabled: isDeleting || isUpdating || isPublishing || isPublishingAction
-            }
-          ]}
-        >
-        <Box paddingBlockEnd="800">
-          <BlockStack gap={{ xs: "800", sm: "400" }}>
-              {/* Product Info */}
-              <InlineGrid columns={{ xs: "1fr", md: "2fr 5fr" }} gap="400">
-                <Box
-                  as="section"
-                  paddingInlineStart={{ xs: "400", sm: "0" }}
-                  paddingInlineEnd={{ xs: "400", sm: "0" }}
-                >
-                  <BlockStack gap="400">
-                    <Text as="h3" variant="headingMd">
-                      Product Information
-                    </Text>
-                    <Text as="p" variant="bodyMd">
-                      Details about the product you're editing content for
-                    </Text>
-                  </BlockStack>
-                </Box>
-                <Card roundedAbove="sm">
-                  <BlockStack gap="300">
-                    <Text variant="bodyMd" as="p">
-                      {productName || 'Loading product name...'}
-                    </Text>
-                  </BlockStack>
-                </Card>
-              </InlineGrid>
-              {smUp ? <Divider /> : null}
-
-              {/* Content Sections with Two-Column Layout */}
-              {Object.entries(CONTENT_SECTIONS).map(([sectionTitle, sectionData], index) => {
+      <EditorLayout
+        header={
+          <StickyHeader
+            productName={productName}
+            onBack={handleBack}
+            onRevert={handleRevert}
+            onDelete={handleDelete}
+            onPublish={handlePublish}
+            isPublishing={isPublishing || isPublishingAction}
+            isDeleting={isDeleting}
+            isUpdating={isUpdating}
+            hasChanges={hasChanges}
+          />
+        }
+        sidebar={
+          <SideNavigation
+            sections={sidebarSections}
+            activeSection={activeSection}
+            onSectionClick={handleSectionClick}
+          />
+        }
+      >
+        <BlockStack gap="400">
+          {/* Content Sections with Collapsible Design */}
+          {Object.entries(CONTENT_SECTIONS).map(([sectionTitle, sectionData], index) => {
                 // Check if any fields in this section have content
                 const hasContent = sectionData.fields.some((field: string) => editedContent[field]);
                 
                 if (!hasContent) return null;
+                
+                // Filter sections based on selected section
+                if (selectedSection !== 'all' && selectedSection !== sectionTitle) return null;
+                
+                const isCollapsed = collapsedSections[sectionTitle];
 
                 return (
-                  <BlockStack key={sectionTitle} gap="400">
-                    <InlineGrid columns={{ xs: "1fr", md: "2fr 5fr" }} gap="400">
-                      <Box
-                        as="section"
-                        paddingInlineStart={{ xs: "400", sm: "0" }}
-                        paddingInlineEnd={{ xs: "400", sm: "0" }}
-                      >
-                        <BlockStack gap="400">
-                          <Text as="h3" variant="headingMd">
-                            {sectionTitle}
-                          </Text>
-                          <Text as="p" variant="bodyMd">
-                            {sectionData.description}
-                          </Text>
-                        </BlockStack>
-                      </Box>
-                      <Card roundedAbove="sm">
-                        <BlockStack gap="400">
+                  <CollapsibleSection
+                    key={sectionTitle}
+                    title={sectionTitle}
+                    description={sectionData.description}
+                    isExpanded={!isCollapsed}
+                    onToggle={() => toggleSection(sectionTitle)}
+                    sectionId={`section-${sectionTitle}`}
+                  >
                           {sectionData.fields.map((field: string) => {
                             const value = getFieldValue(field);
                             if (!value && !editedContent.hasOwnProperty(field)) return null;
 
+                            const isImage = isImageField(field);
+                            const fieldKey = `${field}_uploading`;
+                            const isUploading = uploadingFields[fieldKey];
+                            const isFetchingPreview = fetchingPreviews[field];
+                            // Pass the original editedContent value, not the processed string
+                            const previewUrl = isImage ? getImagePreviewUrl(field, editedContent[field]) : null;
+                            const hasValue = value && value.trim().length > 0;
+
                             return (
                               <Box key={field}>
-                                <TextField
-                                  label={formatFieldName(field)}
-                                  value={value}
-                                  onChange={(newValue) => handleContentChange(field, newValue)}
-                                  multiline={value.length > 100 || value.includes('\n')}
-                                  autoComplete="off"
-                                />
+                                {isImage ? (
+                                  <BlockStack gap="300">
+                                    <Text variant="bodyMd" as="p" fontWeight="medium">
+                                      {formatFieldName(field)}
+                                    </Text>
+                                    
+                                    {/* Image preview with controls beside it */}
+                                    {(previewUrl || isFetchingPreview || hasValue) && !showingImageUpload[field] && (
+                                      <InlineStack gap="300" blockAlign="start" wrap={false}>
+                                        {/* Image Preview */}
+                                        <Box>
+                                          {isFetchingPreview ? (
+                                            <Box padding="400" background="bg-surface-secondary" borderRadius="200" minWidth="120px">
+                                              <InlineStack align="center" blockAlign="center" gap="200">
+                                                <Spinner size="small" />
+                                                <Text variant="bodySm" as="p" tone="subdued">Loading...</Text>
+                                              </InlineStack>
+                                            </Box>
+                                          ) : previewUrl ? (
+                                            <Box borderColor="border" borderWidth="025" borderRadius="200" padding="200">
+                                              <Thumbnail
+                                                source={previewUrl}
+                                                alt={formatFieldName(field)}
+                                                size="large"
+                                              />
+                                            </Box>
+                                          ) : hasValue && value.startsWith('gid://shopify/') ? (
+                                            // If we have a GID but no preview yet, show loading
+                                            <Box padding="400" background="bg-surface-secondary" borderRadius="200" minWidth="120px">
+                                              <InlineStack align="center" blockAlign="center" gap="200">
+                                                <Spinner size="small" />
+                                                <Text variant="bodySm" as="p" tone="subdued">Loading preview...</Text>
+                                              </InlineStack>
+                                            </Box>
+                                          ) : null}
+                                        </Box>
+                                        
+                                        {/* Image Controls - Beside the preview */}
+                                        {hasValue && (
+                                          <BlockStack gap="200">
+                                            <Button
+                                              size="slim"
+                                              onClick={() => setShowingImageUpload(prev => ({ ...prev, [field]: true }))}
+                                              disabled={isUploading || isUpdating || isPublishing}
+                                            >
+                                              Change
+                                            </Button>
+                                            <Button
+                                              size="slim"
+                                              tone="critical"
+                                              onClick={() => handleClearImage(field)}
+                                              disabled={isUploading || isUpdating || isPublishing}
+                                            >
+                                              Remove
+                                            </Button>
+                                          </BlockStack>
+                                        )}
+                                      </InlineStack>
+                                    )}
+                                    
+                                    {/* Unified upload interface - Only shown when no image or user clicks Change */}
+                                    {(!hasValue || showingImageUpload[field]) && (
+                                      <Box 
+                                        padding="400" 
+                                        background="bg-surface-secondary" 
+                                        borderRadius="200"
+                                        borderColor="border-secondary"
+                                        borderWidth="025"
+                                      >
+                                        <BlockStack gap="300">
+                                          <input
+                                            type="file"
+                                            accept="image/*"
+                                            style={{ display: 'none' }}
+                                            ref={(el) => { fileInputRefs.current[field] = el; }}
+                                            onChange={(e) => handleFileSelect(field, e)}
+                                          />
+                                          
+                                          <Button
+                                            onClick={() => triggerFileInput(field)}
+                                            loading={isUploading}
+                                            disabled={isUploading || isUpdating || isPublishing}
+                                            fullWidth
+                                          >
+                                            {isUploading ? 'Uploading...' : '📁 Choose file from computer'}
+                                          </Button>
+                                          
+                                          <InlineStack gap="200" align="center">
+                                            <Box width="100%">
+                                              <Divider />
+                                            </Box>
+                                            <Text variant="bodySm" as="span" tone="subdued">
+                                              OR
+                                            </Text>
+                                            <Box width="100%">
+                                              <Divider />
+                                            </Box>
+                                          </InlineStack>
+                                          
+                                          {(() => {
+                                            // Get the raw value from editedContent to handle all cases
+                                            const rawValue = editedContent[field];
+                                            // Now we only store strings (URLs or GIDs), not objects
+                                            const currentUrl = typeof rawValue === 'string' ? rawValue : '';
+                                            const isExternalUrl = currentUrl.startsWith('http') && !currentUrl.includes('cdn.shopify.com');
+                                            const isShopifyUrl = currentUrl.includes('cdn.shopify.com');
+                                            const isGid = currentUrl.startsWith('gid://');
+                                            
+                                            return (
+                                              <>
+                                                <TextField
+                                                  label="Image URL"
+                                                  labelHidden
+                                                  value={currentUrl.startsWith('http') ? currentUrl : ''}
+                                                  onChange={(newValue) => {
+                                                    // Store URL directly as string
+                                                    setEditedContent(prev => ({ ...prev, [field]: newValue }));
+                                                    setHasChanges(true);
+                                                    
+                                                    // Auto-upload if it's a valid external URL (not Shopify CDN)
+                                                    if (newValue && 
+                                                        newValue.startsWith('http') && 
+                                                        !newValue.includes('cdn.shopify.com') &&
+                                                        !newValue.includes('google.com/imgres') && // Skip Google search URLs
+                                                        !newValue.includes('google.com/url')) {
+                                                      // Small delay to allow state to update and prevent double uploads
+                                                      setTimeout(() => {
+                                                        handleUrlUpload(field, newValue);
+                                                      }, 100);
+                                                    }
+                                                  }}
+                                                  autoComplete="off"
+                                                  placeholder="🔗 Paste image URL (auto-uploads to Shopify)"
+                                                  disabled={isUploading}
+                                                  helpText={
+                                                    isUploading ? "⏳ Uploading to Shopify..." :
+                                                    isGid ? "✓ Shopify image (will convert on publish)" :
+                                                    isShopifyUrl ? "✓ Shopify CDN" :
+                                                    isExternalUrl ? "⏳ Will auto-upload..." :
+                                                    "Paste an image URL - it will auto-upload to Shopify"
+                                                  }
+                                                />
+                                                
+                                                {/* Show status for already uploaded images */}
+                                                {isShopifyUrl && (
+                                                  <Text variant="bodySm" as="p" tone="success">
+                                                    ✓ Image uploaded to Shopify
+                                                  </Text>
+                                                )}
+                                              </>
+                                            );
+                                          })()}
+                                          
+                                          {showingImageUpload[field] && (
+                                            <InlineStack align="end" gap="200">
+                                              <Button
+                                                onClick={() => setShowingImageUpload(prev => ({ ...prev, [field]: false }))}
+                                                size="slim"
+                                              >
+                                                Done
+                                              </Button>
+                                              <Button
+                                                onClick={() => {
+                                                  // Revert to original value and close
+                                                  const originalValue = draft?.processedContent ? 
+                                                    Object.values(draft.processedContent).reduce((acc: any, section: any) => {
+                                                      if (typeof section === 'object' && section !== null) {
+                                                        return { ...acc, ...section };
+                                                      }
+                                                      return acc;
+                                                    }, {})[field] : '';
+                                                  handleContentChange(field, originalValue || '');
+                                                  setShowingImageUpload(prev => ({ ...prev, [field]: false }));
+                                                }}
+                                                variant="plain"
+                                                size="slim"
+                                              >
+                                                Cancel
+                                              </Button>
+                                            </InlineStack>
+                                          )}
+                                        </BlockStack>
+                                      </Box>
+                                    )}
+                                  </BlockStack>
+                                ) : (
+                                  <BlockStack gap="200">
+                                    <Text variant="bodyMd" as="p" fontWeight="medium">
+                                      {formatFieldName(field)}
+                                    </Text>
+                                    <TextField
+                                      label={formatFieldName(field)}
+                                      labelHidden
+                                      value={value}
+                                      onChange={(newValue) => handleContentChange(field, newValue)}
+                                      multiline={value.length > 100 || value.includes('\n')}
+                                      autoComplete="off"
+                                    />
+                                  </BlockStack>
+                                )}
                               </Box>
                             );
                           })}
-                        </BlockStack>
-                      </Card>
-                    </InlineGrid>
-                    {smUp && index < Object.keys(CONTENT_SECTIONS).length - 1 ? <Divider /> : null}
-                  </BlockStack>
+                  </CollapsibleSection>
                 );
               })}
 
@@ -1059,15 +1646,145 @@ export default function EditAiContent() {
                         <BlockStack gap="400">
                           {additionalFields.map(field => {
                             const value = getFieldValue(field);
+                            const isImage = isImageField(field);
+                            const fieldKey = `${field}_uploading`;
+                            const isUploading = uploadingFields[fieldKey];
+                            const isFetchingPreview = fetchingPreviews[field];
+                            // Pass the original editedContent value, not the processed string
+                            const previewUrl = isImage ? getImagePreviewUrl(field, editedContent[field]) : null;
+                            const hasValue = value && value.trim().length > 0;
+
                             return (
                               <Box key={field}>
-                                <TextField
-                                  label={formatFieldName(field)}
-                                  value={value}
-                                  onChange={(newValue) => handleContentChange(field, newValue)}
-                                  multiline={value.length > 100 || value.includes('\n')}
-                                  autoComplete="off"
-                                />
+                                {isImage ? (
+                                  <BlockStack gap="300">
+                                    <Text variant="bodyMd" as="p" fontWeight="medium">
+                                      {formatFieldName(field)}
+                                    </Text>
+                                    
+                                    {/* Image preview section */}
+                                    {(previewUrl || isFetchingPreview || hasValue) && (
+                                      <Box paddingBlockEnd="200">
+                                        {isFetchingPreview ? (
+                                          <Box padding="400" background="bg-surface-secondary" borderRadius="200">
+                                            <InlineStack align="center" blockAlign="center" gap="200">
+                                              <Spinner size="small" />
+                                              <Text variant="bodySm" as="p" tone="subdued">Loading preview...</Text>
+                                            </InlineStack>
+                                          </Box>
+                                        ) : previewUrl ? (
+                                          <Box>
+                                            <Thumbnail
+                                              source={previewUrl}
+                                              alt={formatFieldName(field)}
+                                              size="large"
+                                            />
+                                          </Box>
+                                        ) : hasValue && value.startsWith('gid://shopify/') ? (
+                                          <Box padding="400" background="bg-surface-success" borderRadius="200">
+                                            <Text variant="bodySm" as="p" tone="success">
+                                              ✓ Image uploaded to Shopify
+                                            </Text>
+                                          </Box>
+                                        ) : null}
+                                      </Box>
+                                    )}
+                                    
+                                    {/* Upload section */}
+                                    {!hasValue ? (
+                                      <BlockStack gap="300">
+                                        <Divider />
+                                        <BlockStack gap="200">
+                                          <Text variant="bodySm" as="p" fontWeight="semibold">
+                                            Upload from computer
+                                          </Text>
+                                          <input
+                                            type="file"
+                                            accept="image/*"
+                                            style={{ display: 'none' }}
+                                            ref={(el) => { fileInputRefs.current[field] = el; }}
+                                            onChange={(e) => handleFileSelect(field, e)}
+                                          />
+                                          <Button
+                                            onClick={() => triggerFileInput(field)}
+                                            loading={isUploading}
+                                            disabled={isUploading || isUpdating || isPublishing}
+                                            fullWidth
+                                          >
+                                            {isUploading ? 'Uploading...' : 'Choose file'}
+                                          </Button>
+                                        </BlockStack>
+                                        
+                                        <Divider />
+                                        
+                                        <BlockStack gap="200">
+                                          <Text variant="bodySm" as="p" fontWeight="semibold">
+                                            Or paste image URL
+                                          </Text>
+                                          <form onSubmit={(e) => {
+                                            e.preventDefault();
+                                            if (value && value.startsWith('http')) {
+                                              handleUrlUpload(field, value);
+                                            }
+                                          }}>
+                                            <TextField
+                                              label=""
+                                              labelHidden
+                                              value={value}
+                                              onChange={(newValue) => setEditedContent(prev => ({ ...prev, [field]: newValue }))}
+                                              autoComplete="off"
+                                              placeholder="https://example.com/image.jpg"
+                                              disabled={isUploading}
+                                              helpText="Press Enter to upload to Shopify"
+                                            />
+                                          </form>
+                                          {value && value.startsWith('http') && !value.includes('cdn.shopify.com') && (
+                                            <Button
+                                              onClick={() => handleUrlUpload(field, value)}
+                                              loading={isUploading}
+                                              disabled={isUploading}
+                                              size="slim"
+                                            >
+                                              Upload to Shopify
+                                            </Button>
+                                          )}
+                                        </BlockStack>
+                                      </BlockStack>
+                                    ) : (
+                                      <InlineStack gap="200" align="start">
+                                        <Button
+                                          onClick={() => handleClearImage(field)}
+                                          disabled={isUploading || isUpdating || isPublishing}
+                                          tone="critical"
+                                        >
+                                          Remove image
+                                        </Button>
+                                        <Button
+                                          onClick={() => triggerFileInput(field)}
+                                          loading={isUploading}
+                                          disabled={isUploading || isUpdating || isPublishing}
+                                        >
+                                          Replace image
+                                        </Button>
+                                        <input
+                                          type="file"
+                                          accept="image/*"
+                                          style={{ display: 'none' }}
+                                          ref={(el) => { fileInputRefs.current[field] = el; }}
+                                          onChange={(e) => handleFileSelect(field, e)}
+                                        />
+                                      </InlineStack>
+                                    )}
+                                  </BlockStack>
+                                ) : (
+                                  <TextField
+                                    label={formatFieldName(field)}
+                                    value={value}
+                                    onChange={(newValue) => handleContentChange(field, newValue)}
+                                    multiline={value.length > 100 || value.includes('\n')}
+                                    autoComplete="off"
+                                  />
+                                )}
                               </Box>
                             );
                           })}
@@ -1077,10 +1794,8 @@ export default function EditAiContent() {
                   </BlockStack>
                 );
               })()}
-
-            </BlockStack>
-        </Box>
-        </Page>
+        </BlockStack>
+      </EditorLayout>
 
       {/* Delete Confirmation Modal */}
       <Modal

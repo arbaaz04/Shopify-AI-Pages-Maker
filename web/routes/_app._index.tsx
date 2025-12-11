@@ -677,7 +677,7 @@ export default function Index() {
         
         response = await generateAiContentFromUrl({ 
           productId: overwriteProductId,
-          url: pendingGenerationData.url
+          productUrl: pendingGenerationData.url
         } as any);
       }
       

@@ -82,6 +82,7 @@ export const permissions: GadgetPermissions = {
         generateAiContentFromUrl: true,
         getShopifyProducts: true,
         populateProductMetafields: true,
+        uploadImagesToShopify: true,
       },
     },
     unauthenticated: {

@@ -679,6 +679,11 @@
     wonka "^6.3.2"
     ws "^8.18.2"
 
+"@gadgetinc/core@0.14.0":
+  version "0.14.0"
+  resolved "https://registry.yarnpkg.com/@gadgetinc/core/-/core-0.14.0.tgz#149f63724ecad15438bb773f975ed6ed5c04f9cb"
+  integrity sha512-LLXJcsYrQj3yrYkSUygkKoye2vqzW2d30P5hkiaQnL/ySF+MLKvpvl/QzfgWXZ+XZGxJB6nLepdQzCUWdV0wSQ==
+
 "@gadgetinc/react-shopify-app-bridge@^0.19.1":
   version "0.19.1"
   resolved "https://registry.yarnpkg.com/@gadgetinc/react-shopify-app-bridge/-/react-shopify-app-bridge-0.19.1.tgz#e8fdac65da7f0ce22dfa5960dd4e24d75e1142ce"
