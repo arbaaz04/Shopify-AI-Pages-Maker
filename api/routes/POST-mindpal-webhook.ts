@@ -1,4 +1,5 @@
 import { RouteHandler } from "gadget-server";
+import { setupMetaobjectsAndMetafields } from "../models/shopifyShop/shared/metaobjectDefinitions";
 
 /**
  * MindPal webhook receiver - Backend HTTP route
@@ -6,7 +7,7 @@ import { RouteHandler } from "gadget-server";
  * URL: https://pagebuilder--development.gadget.app/mindpal-webhook
  */
 
-const route: RouteHandler = async ({ request, reply, api, logger }) => {
+const route: RouteHandler = async ({ request, reply, api, logger, connections }) => {
   try {
     // Get the raw payload from MindPal
     const payload = request.body;
@@ -29,7 +30,7 @@ const route: RouteHandler = async ({ request, reply, api, logger }) => {
     }
 
     // Process the webhook data
-    await processWebhookData(parsedPayload, logger, api);
+    await processWebhookData(parsedPayload, logger, api, connections);
     
     // Respond to MindPal with success
     return reply.code(200).send({ 
@@ -51,7 +52,7 @@ const route: RouteHandler = async ({ request, reply, api, logger }) => {
 /**
  * Process the webhook data and update relevant models
  */
-async function processWebhookData(payload: any, logger: any, api: any) {
+async function processWebhookData(payload: any, logger: any, api: any, connections: any) {
   const webhookStartTime = new Date();
   
   try {
@@ -114,7 +115,7 @@ async function processWebhookData(payload: any, logger: any, api: any) {
               'three_steps', 'cta', 'before_after_transformation', 'featured_reviews',
               'key_differences', 'product_comparison', 'where_to_use', 'who_its_for',
               'maximize_results', 'cost_of_inaction', 'choose_your_package',
-              'guarantee', 'faq', 'store_credibility'
+              'guarantee', 'faq', 'store_credibility', 'image_storyboard'
             ];
             
             const foundSections = expectedSections.filter(section => parsedContent[section]);
@@ -167,6 +168,47 @@ async function processWebhookData(payload: any, logger: any, api: any) {
       if (generationJob) {
         const shopDomain = generationJob.shop?.myshopifyDomain;
         const currentStatus = generationJob.status;
+        
+        // Ensure metaobject definitions exist for this shop
+        // Fetch the full shop record with accessToken using internal API for Shopify connection
+        try {
+          logger.info("Setting up metaobject definitions for shop" as any, {
+            shopId: generationJob.shop?.id,
+            shopDomain
+          });
+          
+          // Fetch shop with accessToken using internal API
+          const shopWithToken = await api.internal.shopifyShop.findOne(generationJob.shop.id, {
+            select: {
+              id: true,
+              myshopifyDomain: true,
+              accessToken: true
+            }
+          });
+          
+          if (shopWithToken) {
+            await setupMetaobjectsAndMetafields({
+              connections,
+              logger,
+              api,
+              record: shopWithToken
+            });
+            
+            logger.info("Metaobject definitions setup completed successfully" as any);
+          } else {
+            logger.warn("Shop record not found, skipping metaobject setup" as any, {
+              shopId: generationJob.shop?.id
+            });
+          }
+        } catch (setupError: any) {
+          logger.error("Failed to setup metaobject definitions" as any, {
+            error: setupError.message,
+            shopId: generationJob.shop?.id,
+            shopDomain
+          });
+          // Don't fail the entire webhook if setup fails - continue with metaobject creation
+          // The Shopify connection may have the definitions already
+        }
         
         logger.info("Found generation job for webhook" as any, { 
           jobId: generationJobId,
@@ -263,88 +305,143 @@ async function processWebhookData(payload: any, logger: any, api: any) {
             contentSectionCount: Object.keys(aiContent).length
           });
 
+          // Extract image storyboard data from aiContent
+          const imageStoryboardData = extractImageStoryboard(aiContent);
+
+          try {
+            // Check if draft already exists for this generation job
+            let existingDraft = null;
             try {
-              // Check if draft already exists for this generation job
-              let existingDraft = null;
-              try {
-                const draftList = await api.aiContentDraft.findMany({
-                  filter: { 
-                    generationJob: { 
-                      id: { equals: generationJobId }
-                    } 
-                  },
-                  first: 1
-                });
-                existingDraft = draftList && draftList.length > 0 ? draftList[0] : null;
-              } catch (searchError: any) {
-                // If search fails, proceed to create new draft
-              }
-
-              // Filter out unwanted fields that shouldn't be shown or published
-              const filteredContent = { ...aiContent };
-              const fieldsToRemove = [
-                'three_steps_headline',
-                'how_to_care_headline',
-                'how_to_care_title_1',
-                'how_to_care_title_2', 
-                'how_to_care_title_3',
-                'how_to_care_description_1',
-                'how_to_care_description_2',
-                'how_to_care_description_3'
-              ];
-              
-              fieldsToRemove.forEach(field => {
-                if (filteredContent[field]) {
-                  delete filteredContent[field];
-                  logger.info(`Removed unwanted field: ${field}` as any);
-                }
+              const draftList = await api.aiContentDraft.findMany({
+                filter: { 
+                  generationJob: { 
+                    id: { equals: generationJobId }
+                  } 
+                },
+                first: 1
               });
+              existingDraft = draftList && draftList.length > 0 ? draftList[0] : null;
+            } catch (searchError: any) {
+              // If search fails, proceed to create new draft
+            }
 
-              const draftData = {
-                rawAiContent: aiContent,
-                processedContent: filteredContent,
-                status: 'ready_for_review' as const
+            // Filter out unwanted fields that shouldn't be shown or published
+            const filteredContent = { ...aiContent };
+            const fieldsToRemove = [
+              'three_steps_headline',
+              'how_to_care_headline',
+              'how_to_care_title_1',
+              'how_to_care_title_2', 
+              'how_to_care_title_3',
+              'how_to_care_description_1',
+              'how_to_care_description_2',
+              'how_to_care_description_3'
+            ];
+            
+            fieldsToRemove.forEach(field => {
+              if (filteredContent[field]) {
+                delete filteredContent[field];
+                logger.info(`Removed unwanted field: ${field}` as any);
+              }
+            });
+
+            const draftData = {
+              rawAiContent: aiContent,
+              processedContent: filteredContent,
+              status: 'ready_for_review' as const
+            };
+
+            if (existingDraft) {
+              // Update existing draft
+              const updatedDraft = await api.aiContentDraft.update(existingDraft.id, draftData);
+              logger.info("Updated existing AI content draft" as any, { 
+                draftId: existingDraft.id,
+                shopDomain: shopDomain
+              });
+            } else {
+              // Create new draft
+              const createData = {
+                generationJob: { _link: generationJobId },
+                productId: generationJob.productId,
+                shop: generationJob.shop ? { _link: generationJob.shop.id } : undefined,
+                ...draftData
               };
 
+              try {
+                const newDraft = await api.aiContentDraft.create(createData);
+                logger.info("Created new AI content draft" as any, { 
+                  draftId: newDraft.id,
+                  shopDomain: shopDomain
+                });
+              } catch (createError: any) {
+                // Try with minimal required fields only
+                const simplifiedData = {
+                  generationJob: { _link: generationJobId },
+                  productId: generationJob.productId,
+                  rawAiContent: aiContent,
+                  processedContent: aiContent,
+                  status: 'ready_for_review' as const
+                };
+                
+                const newDraft = await api.aiContentDraft.create(simplifiedData);
+                logger.info("Created new AI content draft with simplified data" as any, { 
+                  draftId: newDraft.id,
+                  shopDomain: shopDomain
+                });
+              }
+            }
+
+            // Trigger metaobject creation and publishing for ALL sections (not just image storyboard)
+            // This will create, publish, and link all metaobjects to the product
+            let draftId;
+            try {
               if (existingDraft) {
-                // Update existing draft
-                const updatedDraft = await api.aiContentDraft.update(existingDraft.id, draftData);
-                logger.info("Updated existing AI content draft" as any, { 
-                  draftId: existingDraft.id,
+                draftId = existingDraft.id;
+              } else {
+                // Get the newly created draft ID from the create response
+                draftId = (await api.aiContentDraft.findMany({
+                  filter: {
+                    generationJob: { id: { equals: generationJobId } }
+                  },
+                  first: 1
+                }))?.[0]?.id;
+              }
+
+              if (draftId && generationJob.shop?.id) {
+                logger.info("Calling populateProductMetafields to create and publish all metaobjects" as any, {
+                  draftId,
+                  productId: generationJob.productId,
+                  shopifyShopId: generationJob.shop.id,
+                  shopDomain: shopDomain
+                });
+
+                await api.populateProductMetafields({
+                  draftId,
+                  productId: generationJob.productId,
+                  shopifyShopId: generationJob.shop.id,
+                  shopDomain: shopDomain
+                });
+
+                logger.info("Successfully created and published all metaobjects" as any, {
+                  draftId,
+                  productId: generationJob.productId,
                   shopDomain: shopDomain
                 });
               } else {
-                // Create new draft
-                const createData = {
-                  generationJob: { _link: generationJobId },
-                  productId: generationJob.productId,
-                  shop: generationJob.shop ? { _link: generationJob.shop.id } : undefined,
-                  ...draftData
-                };
-
-                try {
-                  const newDraft = await api.aiContentDraft.create(createData);
-                  logger.info("Created new AI content draft" as any, { 
-                    draftId: newDraft.id,
-                    shopDomain: shopDomain
-                  });
-                } catch (createError: any) {
-                  // Try with minimal required fields only
-                  const simplifiedData = {
-                    generationJob: { _link: generationJobId },
-                    productId: generationJob.productId,
-                    rawAiContent: aiContent,
-                    processedContent: aiContent,
-                    status: 'ready_for_review' as const
-                  };
-                  
-                  const newDraft = await api.aiContentDraft.create(simplifiedData);
-                  logger.info("Created new AI content draft with simplified data" as any, { 
-                    draftId: newDraft.id,
-                    shopDomain: shopDomain
-                  });
-                }
+                logger.warn("Missing draftId or shopId, skipping metaobject creation" as any, {
+                  hasDraftId: !!draftId,
+                  hasShopId: !!generationJob.shop?.id
+                });
               }
+            } catch (metaobjectError: any) {
+              logger.error("Error triggering metaobject creation" as any, {
+                error: metaobjectError.message,
+                draftId,
+                productId: generationJob.productId,
+                shopDomain: shopDomain
+              });
+              // Don't fail the entire webhook if metaobject creation fails
+            }
           } catch (draftError: any) {
             logger.error("Error creating/updating AI content draft" as any, {
               error: draftError.message,
@@ -380,6 +477,97 @@ async function processWebhookData(payload: any, logger: any, api: any) {
       error: error.message,
       workflowRunId: payload?.workflow_run_id
     });
+  }
+}
+
+/**
+ * Extract image storyboard data from AI content
+ * Maps AI content sections to image storyboard metaobject fields
+ * Note: This is kept for reference but image storyboard is now handled
+ * by populateProductMetafields action along with all other sections
+ */
+function extractImageStoryboard(aiContent: any): any {
+  const storyboard: any = {};
+  
+  // Map AI content sections to image storyboard fields
+  const mappings = {
+    problem_symptoms_image: 'problem_symptoms_image',
+    product_benefits_image: 'product_benefits_image',
+    how_it_works_steps_image: 'how_it_works_steps_image',
+    product_difference_image: 'product_difference_image',
+    where_to_use_image: 'where_to_use_image',
+    who_its_for_image: 'who_its_for_image',
+  };
+
+  // Extract any image URLs that might be included in the AI content
+  Object.entries(mappings).forEach(([aiKey, storyboardKey]) => {
+    if (aiContent[aiKey]) {
+      storyboard[storyboardKey] = aiContent[aiKey];
+    }
+  });
+
+  return storyboard;
+}
+
+/**
+ * Handle creation/update of image storyboard metaobject
+ * Creates the metaobject via Shopify GraphQL and publishes it
+ */
+async function handleImageStoryboardMetaobject(productId: string, imageData: any, logger: any, api: any) {
+  try {
+    // Convert product ID from gid format if needed
+    const numericProductId = productId.replace('gid://shopify/Product/', '');
+
+    logger.info("Creating/updating image storyboard metaobject" as any, {
+      productId: numericProductId,
+      imageFields: Object.keys(imageData).length
+    });
+
+    // Create the image storyboard metaobject fields
+    const fields: any[] = [];
+
+    // Add non-empty image fields
+    Object.entries(imageData).forEach(([key, value]) => {
+      if (value) {
+        fields.push({
+          key,
+          value: typeof value === 'string' ? value : JSON.stringify(value)
+        });
+      }
+    });
+
+    // If no valid fields, skip creation
+    if (fields.length === 0) {
+      logger.info("No valid image fields found for storyboard metaobject" as any, {
+        productId: numericProductId
+      });
+      return;
+    }
+
+    logger.info("Image storyboard metaobject prepared for creation" as any, {
+      productId: numericProductId,
+      fieldCount: fields.length,
+      fieldKeys: fields.map(f => f.key)
+    });
+
+    // Call the populateProductMetafields action to handle metaobject creation
+    // This reuses the existing Shopify API integration and mutation handlers
+    const result = await api.populateProductMetafields({
+      productId: numericProductId,
+      content: { image_storyboard: imageData }
+    });
+
+    logger.info("Image storyboard metaobject created successfully" as any, {
+      productId: numericProductId,
+      result: result?.data
+    });
+
+  } catch (error: any) {
+    logger.error("Error handling image storyboard metaobject" as any, {
+      error: error.message,
+      productId
+    });
+    // Don't throw - continue even if metaobject creation fails
   }
 }
 

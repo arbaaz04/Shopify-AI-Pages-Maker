@@ -122,6 +122,13 @@ export async function run({ params, logger, api, connections }: any) {
         continue;
       }
       
+      // Add specific log for IMAGE_STORYBOARD
+      if (sectionKey === 'image_storyboard') {
+        console.log(`🎬 IMAGE STORYBOARD DETECTED - Processing ${imageFields.length} image fields`);
+        console.log(`   Fields: ${imageFields.join(', ')}`);
+        console.log(`   Section data keys: ${Object.keys(sectionData as any).join(', ')}`);
+      }
+      
       logger?.info(`Processing ${imageFields.length} potential image fields in section: ${sectionKey}`);
       
       for (const fieldKey of imageFields) {

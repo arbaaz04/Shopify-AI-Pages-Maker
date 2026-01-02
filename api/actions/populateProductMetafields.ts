@@ -62,18 +62,13 @@ async function withExponentialBackoff<T>(
 
 export const params = {
   draftId: { type: "string" },
-  productId: { type: "string" }
+  productId: { type: "string" },
+  shopifyShopId: { type: "string", optional: true },
+  shopDomain: { type: "string", optional: true }
 };
 
 export async function run({ params, logger, api, connections }: any) {
-  logger?.info("Action called with params:", { 
-    params, 
-    paramsKeys: Object.keys(params || {}),
-    draftId: params?.draftId,
-    productId: params?.productId
-  });
-  
-  const { draftId, productId } = params;
+  const { draftId, productId, shopifyShopId, shopDomain } = params;
   
   if (!draftId) {
     logger?.error("Draft ID validation failed", { draftId, params });
@@ -81,7 +76,59 @@ export async function run({ params, logger, api, connections }: any) {
   }
   
   if (!productId) {
+    logger?.error("Product ID validation failed", { productId, params });
     throw new Error("Product ID is required");
+  }
+  
+  // Get Shopify connection from either current session or by shopifyShopId
+  let shopify;
+  let resolvedShopDomain = shopDomain;
+  
+  if (shopifyShopId) {
+    // Webhook mode: get connection via shop ID
+    try {
+      // Always fetch the shop explicitly to ensure myshopifyDomain and accessToken are loaded in memory
+      // This prevents the "Shop record is missing required field: myshopifyDomain" error
+      const shop = await api.internal.shopifyShop.findOne(shopifyShopId, {
+        select: {
+          id: true,
+          myshopifyDomain: true,
+          accessToken: true
+        }
+      });
+      
+      if (!shop) {
+        throw new Error(`Shop not found with ID: ${shopifyShopId}`);
+      }
+      
+      // Validate the shop has the required field
+      if (!shop.myshopifyDomain) {
+        logger?.error("Shop record missing myshopifyDomain field", { 
+          shopifyShopId,
+          shopRecord: shop 
+        });
+        throw new Error(`Shop ${shopifyShopId} is missing myshopifyDomain. Please ensure the shop is properly synced with Shopify.`);
+      }
+      
+      // Now that we know the shop is valid, get the connection
+      shopify = await connections.shopify.forShop(shop);
+      resolvedShopDomain = shop.myshopifyDomain;
+    } catch (error: any) {
+      logger?.error("Failed to get Shopify connection for shop", { 
+        shopifyShopId, 
+        shopDomain, 
+        error: error.message,
+        errorCode: error.code
+      });
+      throw error;
+    }
+  } else {
+    // Direct mode: use current session connection
+    shopify = connections.shopify?.current;
+  }
+  
+  if (!shopify) {
+    throw new Error("Shopify connection is not available");
   }
   
   // Fetch the draft to get the processed content  
@@ -91,45 +138,40 @@ export async function run({ params, logger, api, connections }: any) {
   }
   
   const processedContent = draft.processedContent;
-  logger?.info("Fetched processedContent from draft");
-  
-  const shopify = connections.shopify?.current;
-  if (!shopify) {
-    throw new Error("Shopify connection not available");
-  }
-
-  // Skip metaobject definition setup - should already be done during shop install/update
-  // This saves significant time during publish
-  logger?.info("Skipping metaobject definition setup - using existing definitions");
-
-  logger?.info(`Creating Shopify metaobjects and metafields for product ${productId} from draft ${draftId}`);
-  logger?.info("Content source and structure", { 
-    hasContent: !!processedContent,
-    contentType: typeof processedContent,
-    topLevelKeys: processedContent ? Object.keys(processedContent) : [],
-    sampleStructure: processedContent ? Object.keys(processedContent).reduce((acc, key) => {
-      const section = processedContent[key];
-      acc[key] = section && typeof section === 'object' ? Object.keys(section) : typeof section;
-      return acc;
-    }, {} as any) : null
-  });
   
   try {
     // Transform content to match expected structure
-    logger?.info("Original content sections before transformation:", { 
-      sections: Object.keys(processedContent),
-      hasHowToGetMaximumResults: !!processedContent["How_To_Get_Maximum_Results"],
-      hasMaximizeResults: !!processedContent["maximize_results"]
-    });
-    
     const content = transformContent(processedContent, logger);
     
-    logger?.info("Content sections after transformation:", { 
-      sections: Object.keys(content),
-      hasHowToGetMaximumResults: !!content["How_To_Get_Maximum_Results"],
-      hasMaximizeResults: !!content["maximize_results"],
-      maximizeResultsData: content["maximize_results"] ? Object.keys(content["maximize_results"]) : null
-    });
+    // Normalize field names to match metaobject definitions
+    // This handles cases where incoming data uses different field names than the schema
+    const normalizeFieldNames = (section: any, sectionType: string) => {
+      if (!section || typeof section !== 'object') return section;
+      
+      const normalized = { ...section };
+      
+      // Field name mappings for specific sections (currently empty but kept for future use)
+      const fieldMappings: Record<string, Record<string, string>> = {
+        // Example: 'image_storyboard': { 'old_name': 'new_name' }
+      };
+      
+      const mappings = fieldMappings[sectionType];
+      if (mappings) {
+        for (const [oldKey, newKey] of Object.entries(mappings)) {
+          if (oldKey in normalized && !(newKey in normalized)) {
+            normalized[newKey] = normalized[oldKey];
+            delete normalized[oldKey];
+          }
+        }
+      }
+      
+      return normalized;
+    };
+    
+    // Apply field normalization to all sections
+    for (const sectionType of Object.keys(content)) {
+      content[sectionType] = normalizeFieldNames(content[sectionType], sectionType);
+    }
     
     const createdMetaobjects: Record<string, string> = {};
     
@@ -142,59 +184,29 @@ export async function run({ params, logger, api, connections }: any) {
       'cta', 'before_after_transformation', 'featured_reviews', 'key_differences',
       'product_comparison', 'where_to_use', 'who_its_for', 'maximize_results',
       'cost_of_inaction', 'choose_your_package', 'guarantee',
-      'faq', 'store_credibility'
+      'faq', 'store_credibility', 'image_storyboard'
     ];
     
     // STEP 1 & 2: Create and publish each nested metaobject
-    logger?.info(`Starting to create and publish ${sectionTypes.length} section metaobjects`);
-    
     for (const sectionType of sectionTypes) {
       const sectionData = content[sectionType];
+      // Check if section has data
+      if (!sectionData || typeof sectionData !== 'object') {
+        continue;
+      }
       
-      logger?.info(`Checking section: ${sectionType}`, {
-        hasData: !!sectionData,
-        dataType: typeof sectionData,
-        isObject: sectionData && typeof sectionData === 'object',
-        dataKeys: sectionData && typeof sectionData === 'object' ? Object.keys(sectionData) : null
-      });
-      
-      if (sectionData && typeof sectionData === 'object') {
-        logger?.info(`Processing section: ${sectionType}`, {
-          sectionDataKeys: Object.keys(sectionData),
-          sectionDataSize: JSON.stringify(sectionData).length,
-          hasFields: Object.keys(sectionData).length > 0
-        });
+      try {
+        const result = await processImageFields(sectionData, shopify, logger);
+        const processedFields = result.fields;
+        const urlToGidMapping = result.urlToGidMapping;
         
-        // Add try-catch around field processing
-        let processedFields;
-        let urlToGidMapping: Record<string, string> = {};
-        try {
-          logger?.info(`Starting field processing for ${sectionType}`);
-          const result = await processImageFields(sectionData, shopify, logger);
-          processedFields = result.fields;
-          urlToGidMapping = result.urlToGidMapping;
-          
-          // Store the URL->GID mapping for this section
-          if (Object.keys(urlToGidMapping).length > 0) {
-            allUrlToGidMappings[sectionType] = urlToGidMapping;
-          }
-          
-          logger?.info(`Completed field processing for ${sectionType}`, { 
-            fieldCount: processedFields.length,
-            urlsConverted: Object.keys(urlToGidMapping).length
-          });
-        } catch (fieldProcessingError: any) {
-          logger?.error(`Error during field processing for ${sectionType}`, {
-            error: fieldProcessingError?.message || String(fieldProcessingError),
-            sectionDataKeys: Object.keys(sectionData),
-            stack: fieldProcessingError?.stack
-          });
-          throw fieldProcessingError;
+        // Store the URL->GID mapping for this section
+        if (Object.keys(urlToGidMapping).length > 0) {
+          allUrlToGidMappings[sectionType] = urlToGidMapping;
         }
         
         // Validate processed fields before creating metaobject
         if (!processedFields || processedFields.length === 0) {
-          logger?.warn(`No processed fields for ${sectionType}, skipping metaobject creation`);
           continue;
         }
         
@@ -206,55 +218,18 @@ export async function run({ params, logger, api, connections }: any) {
         
         // Store the published metaobject ID for master reference
         createdMetaobjects[sectionType] = metaobjectId;
-        logger?.info(`Successfully created and stored ${sectionType} metaobject: ${metaobjectId}`);
-        
-      } else {
-        logger?.info(`Skipping section ${sectionType} - no data or not an object`, {
-          hasData: !!sectionData,
-          dataType: typeof sectionData
-        });
+      } catch (error: any) {
+        // Continue processing other sections even if one fails
+        logger?.error(`Failed to process section ${sectionType}`, { error: error?.message });
       }
     }
     
-    // Ensure three_steps metaobject is created even if missing from AI content
+    // Skip creating default three_steps - only create if data exists in AI content
     if (!createdMetaobjects['three_steps']) {
-      logger?.info(`three_steps metaobject not found in AI content, creating with default content`);
-      
-      const defaultThreeStepsData = {
-        "three_steps_headline": "Experience Complete Protection In 3 Easy Steps",
-        step_1_headline: "Step 1",
-        step_1_description: "First step description",
-        step_2_headline: "Step 2", 
-        step_2_description: "Second step description",
-        step_3_headline: "Step 3",
-        step_3_description: "Third step description"
-      };
-      
-      try {
-        const result = await processImageFields(defaultThreeStepsData, shopify, logger);
-        const processedFields = result.fields;
-        
-        if (processedFields && processedFields.length > 0) {
-          const metaobjectId = await createNestedMetaobject(shopify, 'three_steps', processedFields, logger);
-          await publishMetaobject(shopify, metaobjectId, 'three_steps', logger);
-          createdMetaobjects['three_steps'] = metaobjectId;
-          logger?.info(`Successfully created default three_steps metaobject: ${metaobjectId}`);
-        } else {
-          logger?.warn(`Could not create default three_steps metaobject - no valid fields`);
-        }
-      } catch (error: any) {
-        logger?.error(`Failed to create default three_steps metaobject`, { error: error?.message });
-        // Continue without three_steps rather than failing the whole process
-      }
+      // Skip - only create if data exists
     }
     
     // STEP 3 & 4: Create and publish the master metaobject
-    logger?.info(`Created and published nested metaobjects summary:`, { 
-      createdCount: Object.keys(createdMetaobjects).length,
-      createdTypes: Object.keys(createdMetaobjects),
-      createdMetaobjects 
-    });
-    
     if (Object.keys(createdMetaobjects).length === 0) {
       throw new Error("No metaobjects were created - no content sections found");
     }
@@ -268,10 +243,15 @@ export async function run({ params, logger, api, connections }: any) {
     // STEP 5: Set the product metafield to reference the published master metaobject
     const metafield = await setProductMetafield(shopify, productId, masterMetaobjectId, logger);
     
-    // STEP 6: Update the draft's processedContent with new GIDs so previews work correctly
+    // STEP 6: Update draft status to published and set publishedAt timestamp
+    const now = new Date();
+    await api.aiContentDraft.update(draftId, {
+      status: 'published',
+      publishedAt: now
+    });
+    
+    // STEP 7: Update the draft's processedContent with new GIDs so previews work correctly
     if (Object.keys(allUrlToGidMappings).length > 0) {
-      logger?.info(`Updating draft with ${Object.keys(allUrlToGidMappings).length} sections containing URL->GID conversions`);
-      
       // Create updated content with GIDs replacing URLs
       const updatedProcessedContent = { ...processedContent };
       
@@ -281,7 +261,6 @@ export async function run({ params, logger, api, connections }: any) {
           
           for (const [fieldKey, gid] of Object.entries(urlToGid)) {
             if (updatedSection[fieldKey]) {
-              logger?.info(`Updating ${sectionType}.${fieldKey}: URL -> ${gid}`);
               updatedSection[fieldKey] = gid;
             }
           }
@@ -294,12 +273,12 @@ export async function run({ params, logger, api, connections }: any) {
       await api.aiContentDraft.update(draftId, {
         processedContent: updatedProcessedContent
       });
-      
-      logger?.info(`Draft ${draftId} updated with converted GIDs`);
     }
     
-    // Note: three_steps is now included as a field in the master_sales_page metaobject
-    // No separate three_steps product metafield needed
+    logger?.info(`Successfully published all metaobjects for product ${productId}`, {
+      totalMetaobjectsCreated: Object.keys(createdMetaobjects).length,
+      masterMetaobjectId
+    });
     
     return {
       success: true,
@@ -308,7 +287,7 @@ export async function run({ params, logger, api, connections }: any) {
       masterMetaobjectId,
       createdMetaobjects,
       totalSectionsCreated: Object.keys(createdMetaobjects).length,
-      message: "Successfully created and published all metaobjects and set product metafield (three_steps included in master_sales_page)"
+      message: "Successfully created and published all metaobjects and set product metafield"
     };
     
   } catch (error: any) {
@@ -330,17 +309,13 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
   const processedFields: { key: string; value: string }[] = [];
   const urlsToUpload: { key: string; url: string }[] = [];
   
-  logger?.info(`Starting processImageFields`, {
-    sectionDataKeys: Object.keys(sectionData),
-    totalFields: Object.keys(sectionData).length
-  });
-  
   // Define fields that should be file references (images)
   const fileReferenceFields = [
     // problem_symptoms
     'symptom_1_image', 'symptom_2_image', 'symptom_3_image', 
     'symptom_4_image', 'symptom_5_image', 'symptom_6_image',
-    // product_introduction  
+    // product_introduction
+    'product_intro_image',
     'feature_1_image', 'feature_2_image', 'feature_3_image',
     'feature_4_image', 'feature_5_image', 'feature_6_image',
     // three_steps
@@ -367,7 +342,10 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
     'guarantee_seal_image',
     // store_credibility
     'store_benefit_1_image', 'store_benefit_2_image', 'store_benefit_3_image',
-    'as_seen_in_logos_image'
+    'as_seen_in_logos_image',
+    // image_storyboard
+    'problem_symptoms_image', 'product_benefits_image', 'how_it_works_all_steps_image',
+    'product_difference_image', 'where_to_use_image', 'who_its_for_image'
   ];
   
   // First pass: categorize fields and collect URLs that need uploading
@@ -436,8 +414,6 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
   
   // Batch upload URLs to Shopify (up to 10 at a time per Shopify's limit)
   if (urlsToUpload.length > 0) {
-    logger?.info(`Batch uploading ${urlsToUpload.length} images to Shopify`);
-    
     const BATCH_SIZE = 10;
     const uploadResults = new Map<string, string>();
     
@@ -445,7 +421,6 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
       const batch = urlsToUpload.slice(i, i + BATCH_SIZE);
       const batchNum = Math.floor(i / BATCH_SIZE) + 1;
       const totalBatches = Math.ceil(urlsToUpload.length / BATCH_SIZE);
-      logger?.info(`Processing batch ${batchNum}/${totalBatches}`);
       
       try {
         const fileCreateMutation = `#graphql
@@ -502,18 +477,12 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
           }
         );
         
-        if (fileResult.fileCreate.userErrors.length > 0) {
-          logger?.warn(`Batch upload had errors:`, fileResult.fileCreate.userErrors);
-          console.warn(`[WARN] Batch ${batchNum} upload had errors:`, fileResult.fileCreate.userErrors);
-        }
-        
         // Map results back to field keys using alt text
         if (fileResult.fileCreate.files) {
           fileResult.fileCreate.files.forEach((file: any, index: number) => {
             if (file?.id && file.id.startsWith('gid://shopify/')) {
               const fieldKey = batch[index].key;
               uploadResults.set(fieldKey, file.id);
-              logger?.info(`Uploaded ${fieldKey}: ${file.id}`);
             }
           });
         }
@@ -524,14 +493,6 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
         }
         
       } catch (error: any) {
-        // Log failed batch with field names for debugging
-        const failedFields = batch.map(b => b.key).join(', ');
-        console.error(`[FAILED] Batch ${batchNum} upload failed after retries. Fields: ${failedFields}. Error:`, error?.message);
-        logger?.error(`Batch ${batchNum} upload failed after retries:`, { 
-          error: error?.message,
-          failedFields,
-          urls: batch.map(b => b.url.substring(0, 50))
-        });
         // Continue with next batch even if this one fails
       }
     }
@@ -543,23 +504,15 @@ async function processImageFields(sectionData: any, shopify: any, logger: any) {
         processedFields.push({ key, value: fileId });
         // Track the URL -> GID conversion
         urlToGidMapping[key] = fileId;
-        logger?.info(`Mapped ${key}: ${url.substring(0, 50)}... -> ${fileId}`);
-      } else {
-        logger?.warn(`No GID obtained for ${key}, skipping field`);
       }
     }
   }
-  
-  logger?.info(`Processed ${processedFields.length} fields for metaobject`, {
-    fieldKeys: processedFields.map(f => f.key)
-  });
   
   // Final validation: ensure all file reference fields have valid Shopify file IDs
   const validatedFields = processedFields.filter(field => {
     if (fileReferenceFields.includes(field.key)) {
       const isValidFileId = field.value && field.value.startsWith('gid://shopify/');
       if (!isValidFileId) {
-        logger?.warn(`Removing invalid file reference field ${field.key}: ${field.value}`);
         return false;
       }
     }
@@ -581,17 +534,6 @@ function isImageUrl(url: string): boolean {
  * Step 1: Create a nested metaobject for a specific section
  */
 async function createNestedMetaobject(shopify: any, sectionType: string, processedFields: any[], logger: any) {
-  logger?.info(`Creating metaobject for ${sectionType}`, {
-    fieldCount: processedFields.length,
-    fields: processedFields.map(f => ({
-      key: f.key,
-      valueType: typeof f.value,
-      valueLength: String(f.value).length,
-      isFileReference: String(f.value).startsWith('gid://shopify/'),
-      valuePreview: String(f.value).substring(0, 50) + (String(f.value).length > 50 ? '...' : '')
-    }))
-  });
-  
   const mutation = `#graphql
     mutation CreateMetaobject($metaobject: MetaobjectCreateInput!) {
       metaobjectCreate(metaobject: $metaobject) {
@@ -647,6 +589,37 @@ async function createNestedMetaobject(shopify: any, sectionType: string, process
   );
   
   if (result.metaobjectCreate.userErrors.length > 0) {
+    const errors = result.metaobjectCreate.userErrors;
+    
+    // Check if errors are due to missing field definitions
+    const fieldDefinitionErrors = errors.filter((e: any) => 
+      e.message?.includes('Field definition') && e.message?.includes('does not exist')
+    );
+    
+    if (fieldDefinitionErrors.length > 0) {
+      // Log the missing field definitions and skip them
+      for (const error of fieldDefinitionErrors) {
+        const fieldMatch = error.message?.match(/Field definition "([^"]+)"/);
+        const fieldName = fieldMatch ? fieldMatch[1] : 'unknown';
+        logger?.warn(`Skipping unknown field in ${sectionType}: ${fieldName}`, { error: error.message });
+        
+        // Remove the problematic field from processedFields and retry
+        const fieldIndexToRemove = processedFields.findIndex(f => f.key === fieldName);
+        if (fieldIndexToRemove !== -1) {
+          processedFields.splice(fieldIndexToRemove, 1);
+        }
+      }
+      
+      // Retry creation without the invalid fields
+      if (processedFields.length > 0) {
+        return await createNestedMetaobject(shopify, sectionType, processedFields, logger);
+      } else {
+        logger?.error(`No valid fields remaining for ${sectionType} after removing unknown fields`);
+        throw new Error(`No valid fields to create ${sectionType}`);
+      }
+    }
+    
+    // Other types of errors - log and throw
     logger?.error(`Failed to create ${sectionType}`, { 
       errors: result.metaobjectCreate.userErrors,
       fieldCount: processedFields.length,
@@ -660,7 +633,6 @@ async function createNestedMetaobject(shopify: any, sectionType: string, process
   }
   
   const metaobjectId = result.metaobjectCreate.metaobject.id;
-  logger?.info(`Created ${sectionType} metaobject: ${metaobjectId}`);
   
   return metaobjectId;
 }
@@ -669,8 +641,6 @@ async function createNestedMetaobject(shopify: any, sectionType: string, process
  * Step 2: Publish a metaobject to make it ACTIVE
  */
 async function publishMetaobject(shopify: any, metaobjectId: string, sectionType: string, logger: any) {
-  logger?.info(`Publishing ${sectionType} metaobject: ${metaobjectId}`);
-  
   const mutation = `#graphql
     mutation PublishMetaobject($id: ID!, $metaobject: MetaobjectUpdateInput!) {
       metaobjectUpdate(id: $id, metaobject: $metaobject) {
@@ -742,7 +712,6 @@ async function publishMetaobject(shopify: any, metaobjectId: string, sectionType
   }
   
   const status = result.metaobjectUpdate.metaobject.capabilities.publishable.status;
-  logger?.info(`Published ${sectionType} metaobject: ${metaobjectId} - Status: ${status}`);
   
   return status;
 }
@@ -751,8 +720,6 @@ async function publishMetaobject(shopify: any, metaobjectId: string, sectionType
  * Step 3: Create master sales page metaobject with references to nested metaobjects
  */
 async function createMasterMetaobject(shopify: any, nestedMetaobjectIds: Record<string, string>, logger: any) {
-  logger?.info(`Creating master sales page metaobject`);
-  
   // Define the valid field names for master_sales_page metaobject schema
   // Only include sections that have corresponding field definitions in Shopify
   const validMasterFields = [
@@ -760,8 +727,7 @@ async function createMasterMetaobject(shopify: any, nestedMetaobjectIds: Record<
     'cta', 'before_after_transformation', 'featured_reviews', 'key_differences',
     'product_comparison', 'where_to_use', 'who_its_for', 'maximize_results',
     'cost_of_inaction', 'choose_your_package', 'guarantee',
-    'faq', 'store_credibility'
-    // Note: 'three_steps' is now included in master_sales_page schema
+    'faq', 'store_credibility', 'image_storyboard'
   ];
   
   const masterFields = Object.keys(nestedMetaobjectIds)
@@ -770,13 +736,6 @@ async function createMasterMetaobject(shopify: any, nestedMetaobjectIds: Record<
       key,
       value: nestedMetaobjectIds[key]
     }));
-  
-  logger?.info(`Master fields for master_sales_page:`, { 
-    totalCreated: Object.keys(nestedMetaobjectIds).length,
-    validForMaster: masterFields.length,
-    excludedSections: Object.keys(nestedMetaobjectIds).filter(key => !validMasterFields.includes(key)),
-    masterFields 
-  });
   
   const mutation = `#graphql
     mutation CreateMetaobject($metaobject: MetaobjectCreateInput!) {
@@ -840,7 +799,6 @@ async function createMasterMetaobject(shopify: any, nestedMetaobjectIds: Record<
   }
   
   const masterMetaobjectId = result.metaobjectCreate.metaobject.id;
-  logger?.info(`Created master sales page metaobject: ${masterMetaobjectId}`);
   
   return masterMetaobjectId;
 }
@@ -849,13 +807,6 @@ async function createMasterMetaobject(shopify: any, nestedMetaobjectIds: Record<
  * Step 5: Set product metafield to reference the master metaobject
  */
 async function setProductMetafield(shopify: any, productId: string, metaobjectId: string, logger: any, customKey: string = 'master_sales_page') {
-  logger?.info(`Setting metafield on product:`, {
-    productId,
-    productGid: `gid://shopify/Product/${productId}`,
-    metaobjectId,
-    namespace: "custom",
-    key: customKey
-  });
   
   const mutation = `#graphql
     mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -921,11 +872,6 @@ async function setProductMetafield(shopify: any, productId: string, metaobjectId
     }
   );
   
-  logger?.info(`Metafield set result:`, { 
-    userErrors: result.metafieldsSet?.userErrors,
-    metafields: result.metafieldsSet?.metafields
-  });
-  
   if (result.metafieldsSet.userErrors && result.metafieldsSet.userErrors.length > 0) {
     const errors = result.metafieldsSet.userErrors;
     logger?.error("Failed to set metafield on product", { errors, productId, metaobjectId, customKey });
@@ -938,14 +884,6 @@ async function setProductMetafield(shopify: any, productId: string, metaobjectId
   }
   
   const metafield = result.metafieldsSet.metafields[0];
-  logger?.info(`Successfully set metafield on product ${productId}`, {
-    metafieldId: metafield.id,
-    namespace: metafield.namespace,
-    key: metafield.key,
-    value: metafield.value,
-    type: metafield.type,
-    updatedAt: metafield.updatedAt
-  });
   
   return metafield;
 }

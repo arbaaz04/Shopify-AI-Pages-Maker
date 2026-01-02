@@ -74,7 +74,7 @@ export function StickyHeader({
             loading={isPublishing}
             disabled={isPublishing || isDeleting || isUpdating}
           >
-            Upload Images & Publish
+            Save Product Details
           </Button>
         </InlineStack>
       </InlineStack>

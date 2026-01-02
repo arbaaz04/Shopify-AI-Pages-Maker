@@ -44,6 +44,7 @@ const SECTION_ICONS: Record<string, any> = {
   "Guarantee": ShieldCheckMarkIcon,
   "FAQ": QuestionCircleIcon,
   "Store Credibility": StoreIcon,
+  "Image Storyboard": ImageIcon,
 };
 
 /**

@@ -4,29 +4,24 @@ import {
   Box,
   Button,
   Card,
-  Layout,
-  Link,
   Page,
   Text,
-  Badge,
-  DataTable,
-  Spinner,
-  Pagination,
-  Filters,
   EmptyState,
   Toast,
-  Frame,
   TextField,
   Modal,
   FormLayout,
+  Pagination,
   InlineStack,
-  Divider,
-  RadioButton
+  Frame
 } from "@shopify/polaris";
 import { useGlobalAction } from "@gadgetinc/react";
 import { api } from "../api";
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useNavigate } from "@remix-run/react";
+import { ProductListItem } from "../components/ProductListItem";
+import { ProductListSkeleton } from "../components/ProductListSkeleton";
+import { ProductsListHeader } from "../components/ProductsListHeader";
 
 export default function Index() {
   // ...existing code...
@@ -724,206 +719,124 @@ export default function Index() {
     setToastActive(false);
   }, []);
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'not_generated':
-        return <Badge tone="critical">Not Generated</Badge>;
-      case 'in_progress':
-        return <Badge tone="info">In Progress</Badge>;
-      case 'ready_for_review':
-        return <Badge tone="attention">Ready for Review</Badge>;
-      case 'published':
-        return <Badge tone="success">Published</Badge>;
-      case 'completed':
-        return <Badge tone="success">Completed</Badge>;
-      default:
-        return <Badge tone="critical">Not Generated</Badge>;
+  const handleProductClick = useCallback((productId: string) => {
+    // Navigate to editor or open generation modal based on status
+    const product = allProducts.find(p => p.id === productId);
+    if (product?.draftId && (product.status === 'ready_for_review' || product.status === 'published')) {
+      navigate(`/editor/${product.draftId}`);
+    } else {
+      handleOpenGenerationModal(productId, false);
     }
-  };
-
-  const rows = paginatedProducts.map((product: any) => [
-    product.name,
-    getStatusBadge(product.status),
-    product.lastGenerated || 'Never',
-    (() => {
-      // If published, show both buttons
-      if (product.status === 'published' && product.draftId) {
-        return (
-          <InlineStack gap="200">
-            <Button
-              size="slim"
-              disabled={product.status === 'in_progress' || isGenerating}
-              onClick={() => navigate(`/editor/${product.draftId}`)}
-            >
-              Review & Edit
-            </Button>
-            <Button
-              size="slim"
-              tone="critical"
-              disabled={product.status === 'in_progress' || isGenerating}
-              loading={isGenerating}
-              onClick={() => handleOpenGenerationModal(product.id, true)}
-            >
-              Generate New
-            </Button>
-          </InlineStack>
-        );
-      }
-      // If ready for review, show review button
-      if (product.status === 'ready_for_review' && product.draftId) {
-        return (
-          <Button
-            size="slim"
-            disabled={product.status === 'in_progress' || isGenerating}
-            onClick={() => navigate(`/editor/${product.draftId}`)}
-          >
-            Review & Edit
-          </Button>
-        );
-      }
-      // Otherwise, show generate button
-      return (
-        <Button
-          size="slim"
-          disabled={product.status === 'in_progress' || isGenerating}
-          loading={isGenerating}
-          onClick={() => handleOpenGenerationModal(product.id, false)}
-        >
-          Generate
-        </Button>
-      );
-    })()
-  ]);
+  }, [allProducts, navigate]);
 
   return (
     <Frame>
-      <Page title="AI Sales Page Automator">
-        <Box paddingBlockEnd="800">
-          <Layout>
-            <Layout.Section>
-              <Card>
-                  <BlockStack gap="400">
-                    <Box paddingBlockEnd="200">
-                      <BlockStack gap="200">
-                        <Box>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <Text variant="headingMd" as="h2">
-                              Product Sales Pages
-                            </Text>
-                            <Button 
-                              size="slim" 
-                              onClick={handleRefreshProductsList}
-                              disabled={isRefreshing || isLoading}
-                              loading={isRefreshing}
-                            >
-                              Refresh Status
-                            </Button>
-                          </div>
-                        </Box>
-                        <Text variant="bodyMd" as="p">
-                          Generate AI-powered sales page content for your products. Generation might take a few minutes.
-                        </Text>
-                      </BlockStack>
-                    </Box>                            
-              {error && (
-                <Banner tone="critical">
-                  <Text variant="bodyMd" as="p">Error loading products: {error}</Text>
-                </Banner>
-              )}
-              
-              {isLoading ? (
-                <Box padding="800">
-                  <BlockStack align="center">
-                    <Spinner accessibilityLabel="Loading products" size="large" />
-                  </BlockStack>
+      <Page 
+        title="RevenueFlows AI"
+        subtitle="Generate AI-powered sales page content for your products in one click"
+      >
+      <div style={{ paddingBottom: '20px' }}>
+        <BlockStack gap="400">
+        {/* Error Banner */}
+        {error && (
+          <Banner tone="critical" onDismiss={() => setError(null)}>
+            {error}
+          </Banner>
+        )}
+
+        {/* Loading State with Skeleton */}
+        {isLoading ? (
+          <ProductListSkeleton count={10} />
+        ) : (
+          <>
+            {/* Search Bar, Generate from URL Button, and Refresh Button */}
+            <InlineStack gap="200" align="space-between">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <TextField
+                  label=""
+                  value={searchQuery}
+                  onChange={handleSearchChange}
+                  placeholder="Search products..."
+                  autoComplete="off"
+                  clearButton
+                  onClearButtonClick={() => setSearchQuery('')}
+                />
+              </div>
+              <InlineStack gap="200">
+                <Button onClick={handleModalOpen} variant="secondary">
+                  Generate from URL
+                </Button>
+                <Button
+                  onClick={handleRefreshProductsList}
+                  disabled={isRefreshing || isLoading}
+                  loading={isRefreshing}
+                  variant="primary"
+                >
+                  ↻ Refresh
+                </Button>
+              </InlineStack>
+            </InlineStack>
+
+            {/* Products count */}
+            <Text variant="bodySm" tone="subdued" as="p">
+              {filteredProducts.length === allProducts.length 
+                ? `${allProducts.length} products`
+                : `${filteredProducts.length} of ${allProducts.length} products`
+              }
+            </Text>
+
+            {/* Products List Card */}
+            <div style={{ overflow: 'hidden', borderRadius: '8px', border: '1px solid var(--p-color-border-subdued)' }}>
+              <Card padding="0">
+                {paginatedProducts.length === 0 ? (
+                <Box padding="1600">
+                  <EmptyState
+                    heading={searchQuery ? "No products found" : "No products"}
+                    image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+                  >
+                    <p>
+                      {searchQuery
+                        ? 'Try a different search term.'
+                        : 'Get started by adding products to your store.'}
+                    </p>
+                  </EmptyState>
                 </Box>
               ) : (
-                <BlockStack gap="400">
-                  {/* Search Bar and Generate from URL Button - only show for 10+ products */}
-                  {allProducts.length >= 10 && (
-                    <InlineStack gap="400" align="space-between">
-                      <Box minWidth="80%">
-                        <TextField
-                          label=""
-                          placeholder="Search products"
-                          value={searchQuery}
-                          onChange={handleSearchChange}
-                          clearButton
-                          onClearButtonClick={() => setSearchQuery('')}
-                          autoComplete="off"
-                        />
-                      </Box>
-                      <Button onClick={handleModalOpen}>
-                        Generate from URL
-                      </Button>
-                    </InlineStack>
-                  )}
-
-                  {/* Generate from URL Button for smaller product lists */}
-                  {allProducts.length < 10 && allProducts.length > 0 && (
-                    <Box paddingBlockEnd="400">
-                      <InlineStack align="end">
-                        <Button onClick={handleModalOpen}>
-                          Generate from URL
-                        </Button>
-                      </InlineStack>
-                    </Box>
-                  )}
-
-                  {/* Products count */}
-                  <Text variant="bodySm" tone="subdued" as="p">
-                    {filteredProducts.length === allProducts.length 
-                      ? `${allProducts.length} products`
-                      : `${filteredProducts.length} of ${allProducts.length} products`
-                    }
-                  </Text>
-
-                  {/* Products table or empty state */}
-                  {paginatedProducts.length === 0 ? (
-                    <EmptyState
-                      heading="No products found"
-                      image="https://cdn.shopify.com/s/files/1/0005/4175/0643/files/empty-state.svg"
-                    >
-                      <Text variant="bodyMd" as="p">
-                        {searchQuery 
-                          ? `No products match your search "${searchQuery}"`
-                          : "No products found in your store"
-                        }
-                      </Text>
-                    </EmptyState>
-                  ) : (
-                    <BlockStack gap="400">
-                      <DataTable
-                        columnContentTypes={['text', 'text', 'text', 'text']}
-                        headings={['Product', 'AI Content Status', 'Last Generated', 'Actions']}
-                        rows={rows}
-                        truncate
-                      />
-                      
-                      {/* Pagination - only show for 10+ products */}
-                      {showPagination && (
-                        <Box paddingBlockStart="400">
-                          <BlockStack align="center">
-                            <Pagination
-                              label={`Page ${currentPage} of ${totalPages}`}
-                              hasPrevious={currentPage > 1}
-                              onPrevious={() => handlePageChange(currentPage - 1)}
-                              hasNext={currentPage < totalPages}
-                              onNext={() => handlePageChange(currentPage + 1)}
-                            />
-                          </BlockStack>
-                        </Box>
-                      )}
-                    </BlockStack>
-                  )}
-                </BlockStack>
+                <>
+                  <ProductsListHeader />
+                  {paginatedProducts.map((product) => (
+                    <ProductListItem
+                      key={product.id}
+                      product={product}
+                      onClick={handleProductClick}
+                      onGenerate={handleOpenGenerationModal}
+                      onReview={(draftId) => navigate(`/editor/${draftId}`)}
+                      isGenerating={isGenerating}
+                    />
+                  ))}
+                </>
               )}
-            </BlockStack>
-          </Card>
-        </Layout.Section>
-      </Layout>
-      </Box>
-      </Page>
+              </Card>
+            </div>
+
+            {/* Pagination */}
+            {paginatedProducts.length > 0 && showPagination && (
+              <Box paddingBlockStart="200">
+                <InlineStack align="center">
+                  <Pagination
+                    hasPrevious={currentPage > 1}
+                    onPrevious={() => handlePageChange(currentPage - 1)}
+                    hasNext={currentPage < totalPages}
+                    onNext={() => handlePageChange(currentPage + 1)}
+                    label={`Page ${currentPage} of ${totalPages}`}
+                  />
+                </InlineStack>
+              </Box>
+            )}
+          </>
+        )}
+        </BlockStack>
+      </div>
 
       {/* Toast for success/error messages */}
       {toastActive && (
@@ -1031,13 +944,18 @@ export default function Index() {
             </Text>
             
             <BlockStack gap="300">
-              <RadioButton
-                label="Use product information from Shopify"
-                checked={generationOption === 'shopify'}
-                id="shopify-option"
-                name="generation-option"
-                onChange={() => setGenerationOption('shopify')}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <input
+                  type="radio"
+                  id="shopify-option"
+                  name="generation-option"
+                  checked={generationOption === 'shopify'}
+                  onChange={() => setGenerationOption('shopify')}
+                />
+                <label htmlFor="shopify-option" style={{ margin: 0, cursor: 'pointer' }}>
+                  Use product information from Shopify
+                </label>
+              </div>
               
               {generationOption === 'shopify' && (
                 <Box paddingInlineStart="400">
@@ -1053,13 +971,18 @@ export default function Index() {
                 </Box>
               )}
               
-              <RadioButton
-                label="Get product information from external reference URL"
-                checked={generationOption === 'url'}
-                id="url-option"
-                name="generation-option"
-                onChange={() => setGenerationOption('url')}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <input
+                  type="radio"
+                  id="url-option"
+                  name="generation-option"
+                  checked={generationOption === 'url'}
+                  onChange={() => setGenerationOption('url')}
+                />
+                <label htmlFor="url-option" style={{ margin: 0, cursor: 'pointer' }}>
+                  Get product information from external reference URL
+                </label>
+              </div>
               
               {generationOption === 'url' && (
                 <Box paddingInlineStart="400">
@@ -1077,6 +1000,7 @@ export default function Index() {
           </BlockStack>
         </Modal.Section>
       </Modal>
+    </Page>
     </Frame>
   );
 }

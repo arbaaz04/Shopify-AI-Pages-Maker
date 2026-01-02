@@ -32,6 +32,7 @@ export const IMAGE_FIELDS = {
     'symptom_4_image', 'symptom_5_image', 'symptom_6_image'
   ],
   product_introduction: [
+    'product_intro_image', // OF NOTE MIGHT BE NEEDED OR CAUSE ISSUES WITH MINDPAL
     'feature_1_image', 'feature_2_image', 'feature_3_image',
     'feature_4_image', 'feature_5_image', 'feature_6_image'
   ],
@@ -64,7 +65,12 @@ export const IMAGE_FIELDS = {
     'package_1_image', 'package_2_image', 'package_3_image'
   ],
   store_credibility: [
-    'store_benefit_1_image', 'store_benefit_2_image', 'store_benefit_3_image'
+    'store_benefit_1_image', 'store_benefit_2_image', 'store_benefit_3_image', 'as_seen_in_logos_image'
+  ],
+  // NAMING IMPORTANT LATER ON FOR MINDPAL
+  image_storyboard: [
+    'problem_symptoms_image', 'product_benefits_image', 'how_it_works_steps_image',
+    'product_difference_image', 'where_to_use_image', 'who_its_for_image'
   ]
 } as const;
 

@@ -69,6 +69,7 @@ const CONTENT_SECTIONS = {
   "Product Introduction": {
     description: "Introduce your product with key features and benefits",
     fields: [
+      "product_intro_image",
       "product_intro_headline",
       "product_intro_subheadline",
       "product_intro_description",
@@ -314,6 +315,17 @@ const CONTENT_SECTIONS = {
       "as_seen_in_logos_image",
       "browse_other_products_headline"
     ]
+  },
+  "Image Storyboard": {
+    description: "Visual storyboard showcasing product usage and benefits through images",
+    fields: [
+      "problem_symptoms_image",
+      "product_benefits_image",
+      "how_it_works_all_steps_image",
+      "product_difference_image",
+      "where_to_use_image",
+      "who_its_for_image"
+    ]
   }
 };
 
@@ -368,6 +380,11 @@ export default function EditAiContent() {
   const { smUp } = useBreakpoints();
   const shopify = useAppBridge();
   
+  console.log('[EDITOR DEBUG] Component render:', {
+    draftId,
+    timestamp: new Date().toISOString()
+  });
+  
   // Early return if no draftId
   if (!draftId) {
     return (
@@ -384,6 +401,17 @@ export default function EditAiContent() {
   
   // Fetch the AI content draft
   const [{ data: draft, fetching: isLoading, error }] = useFindOne(api.aiContentDraft, draftId);
+  
+  // Log draft fetch status changes
+  useEffect(() => {
+    console.log('[EDITOR DEBUG] Draft fetch status:', {
+      draftId: draft?.id,
+      fetching: isLoading,
+      hasError: !!error,
+      hasDraft: !!draft,
+      timestamp: new Date().toISOString()
+    });
+  }, [draft?.id, isLoading, error]);
   
   // Actions for updating
   const [{ fetching: isUpdating }, updateDraft] = useAction(api.aiContentDraft.update);
@@ -496,6 +524,13 @@ export default function EditAiContent() {
 
   // Handle products data when it's fetched
   useEffect(() => {
+    console.log('[EDITOR DEBUG] Products data effect triggered:', {
+      hasProductsData: !!productsData?.products,
+      productsCount: productsData?.products?.length,
+      draftProductId: draft?.productId,
+      timestamp: new Date().toISOString()
+    });
+    
     if (productsData?.products && Array.isArray(productsData.products) && draft?.productId) {
       // Try to find the product by different ID formats
       let product = null;
@@ -555,12 +590,17 @@ export default function EditAiContent() {
       // Check if transformation actually changed anything
       const hasTransformations = checkForTransformations(flattenedContent, transformedContent);
       
+      console.log('[EDITOR DEBUG] Content initialization:', {
+        draftId: draft.id,
+        hasTransformations,
+        transformedFieldsCount: Object.keys(transformedContent).length,
+        timestamp: new Date().toISOString()
+      });
+      
       setEditedContent(transformedContent);
       
-      // If transformations were applied, automatically save the transformed content
-      if (hasTransformations) {
-        autoSaveTransformedContent(transformedContent);
-      }
+      // AUTO-SAVE REMOVED: Transformations detected but not auto-saving to prevent reload loop
+      // User must manually save any changes
     }
     
     // Fetch product name if we have a productId
@@ -571,6 +611,12 @@ export default function EditAiContent() {
 
   // Manage save bar animation states
   useEffect(() => {
+    console.log('[EDITOR DEBUG] Save bar animation check:', {
+      hasChanges,
+      showSaveBar,
+      timestamp: new Date().toISOString()
+    });
+    
     if (hasChanges && !showSaveBar) {
       // Show with slide up animation
       setShowSaveBar(true);
@@ -653,7 +699,8 @@ export default function EditAiContent() {
           "Choose Your Package": "choose_your_package",
           "Guarantee": "guarantee",
           "FAQ": "faq",
-          "Store Credibility": "store_credibility"
+          "Store Credibility": "store_credibility",
+          "Image Storyboard": "image_storyboard"
         };
         return sectionKeyMapping[sectionTitle] || sectionTitle.toLowerCase().replace(/\s+/g, '_');
       }
@@ -926,6 +973,11 @@ export default function EditAiContent() {
 
   // Clear fetch tracking when draft changes
   useEffect(() => {
+    console.log('[EDITOR DEBUG] Draft ID changed, clearing fetch tracking:', {
+      draftId: draft?.id,
+      timestamp: new Date().toISOString()
+    });
+    
     if (draft?.id) {
       fetchAttempted.current.clear();
       setPreviewUrls({});
@@ -935,6 +987,12 @@ export default function EditAiContent() {
 
   // Effect to fetch previews for Shopify file IDs when content loads
   useEffect(() => {
+    console.log('[EDITOR DEBUG] Preview fetch effect triggered:', {
+      draftId: draft?.id,
+      editedContentKeys: Object.keys(editedContent).length,
+      timestamp: new Date().toISOString()
+    });
+    
     if (!draft?.id || Object.keys(editedContent).length === 0) return;
     
     Object.entries(editedContent).forEach(([fieldName, value]) => {
@@ -966,71 +1024,20 @@ export default function EditAiContent() {
     });
   }, [draft?.id, editedContent, isImageField, fetchShopifyFilePreview, previewUrls]);
 
-  // Auto-save transformed content when transformations are detected
-  const autoSaveTransformedContent = useCallback(async (transformedContent: Record<string, any>) => {
-    if (!draft?.id) return;
-    
-    try {
-      // Restructure the transformed content the same way as manual save
-      const restructuredContent: Record<string, any> = {};
-      
-      // Group fields back into their sections
-      const sectionKeyMapping = {
-        "Dynamic Buy Box": "dynamic_buy_box",
-        "Problem Symptoms": "problem_symptoms", 
-        "Product Introduction": "product_introduction",
-        "3 Steps": "three_steps",
-        "CTA": "cta",
-        "Before/After Transformation": "before_after_transformation",
-        "Featured Reviews": "featured_reviews",
-        "Key Differences": "key_differences",
-        "Product Comparison": "product_comparison",
-        "Where to Use": "where_to_use",
-        "Who It's For": "who_its_for",
-        "Maximize Results": "maximize_results",
-        "Cost of Inaction": "cost_of_inaction",
-        "Choose Your Package": "choose_your_package",
-        "Guarantee": "guarantee",
-        "FAQ": "faq",
-        "Store Credibility": "store_credibility"
-      };
-      
-      Object.entries(CONTENT_SECTIONS).forEach(([sectionName, sectionData]) => {
-        const sectionKey = sectionKeyMapping[sectionName as keyof typeof sectionKeyMapping];
-        const sectionFields: Record<string, any> = {};
-        
-        sectionData.fields.forEach((field: string) => {
-          if (transformedContent.hasOwnProperty(field)) {
-            sectionFields[field] = transformedContent[field];
-          }
-        });
-        
-        if (Object.keys(sectionFields).length > 0) {
-          restructuredContent[sectionKey] = sectionFields;
-        }
-      });
-      
-      // Add any additional fields that don't belong to predefined sections
-      const allDefinedFields = Object.values(CONTENT_SECTIONS).flatMap(section => section.fields);
-      Object.entries(transformedContent).forEach(([field, value]) => {
-        if (!allDefinedFields.includes(field)) {
-          restructuredContent[field] = value;
-        }
-      });
-
-      await updateDraft({
-        id: draft.id,
-        processedContent: restructuredContent
-      });
-      
-      // Auto-save completed silently
-    } catch (error: any) {
-      console.error('Auto-save failed:', error);
-      // Don't show error toast for auto-save failures to avoid being intrusive
-    }
-  }, [draft?.id, updateDraft, shopify]);
+  // AUTO-SAVE FUNCTIONALITY REMOVED
+  // Previous auto-save was causing infinite reload loops because:
+  // 1. Draft loads -> detects transformations -> auto-saves
+  // 2. Auto-save updates draft -> triggers refetch
+  // 3. Refetch loads draft -> detects transformations again -> infinite loop
+  // User must now manually save any changes using the Save button
 
   const handleSave = useCallback(async () => {
+    console.log('[EDITOR DEBUG] handleSave called:', {
+      draftId: draft?.id,
+      hasDraft: !!draft,
+      timestamp: new Date().toISOString()
+    });
+    
     if (!draft?.id) return;
     
     try {
@@ -1055,7 +1062,8 @@ export default function EditAiContent() {
         "Choose Your Package": "choose_your_package",
         "Guarantee": "guarantee",
         "FAQ": "faq",
-        "Store Credibility": "store_credibility"
+        "Store Credibility": "store_credibility",
+        "Image Storyboard": "image_storyboard"
       };
       
       Object.entries(CONTENT_SECTIONS).forEach(([sectionName, sectionData]) => {
@@ -1085,6 +1093,12 @@ export default function EditAiContent() {
         id: draft.id,
         processedContent: restructuredContent
       });
+      
+      console.log('[EDITOR DEBUG] Draft saved successfully:', {
+        draftId: draft.id,
+        timestamp: new Date().toISOString()
+      });
+      
       setHasChanges(false);
     } catch (error: any) {
       console.error('Save failed:', error);
@@ -1113,10 +1127,19 @@ export default function EditAiContent() {
   }, [draft?.processedContent, shopify]);
 
   const handlePublish = useCallback(async () => {
+    console.log('[EDITOR DEBUG] handlePublish called (Save Product Details):', {
+      draftId: draft?.id,
+      timestamp: new Date().toISOString()
+    });
+    
     if (!draft?.id) return;
     
     setIsPublishing(true);
     setPublishingStep('uploading');
+    
+    console.log('[EDITOR DEBUG] Starting publish flow, step: uploading', {
+      timestamp: new Date().toISOString()
+    });
     
     try {
       // Step 1: Save any current changes first
@@ -1142,7 +1165,8 @@ export default function EditAiContent() {
           "Choose Your Package": "choose_your_package",
           "Guarantee": "guarantee",
           "FAQ": "faq",
-          "Store Credibility": "store_credibility"
+          "Store Credibility": "store_credibility",
+          "Image Storyboard": "image_storyboard"
         };
         
         Object.entries(CONTENT_SECTIONS).forEach(([sectionName, sectionData]) => {
@@ -1173,6 +1197,11 @@ export default function EditAiContent() {
           processedContent: restructuredContent
         });
         
+        console.log('[EDITOR DEBUG] Draft saved before publish:', {
+          draftId: draft.id,
+          timestamp: new Date().toISOString()
+        });
+        
         setHasChanges(false);
       }
       
@@ -1184,31 +1213,54 @@ export default function EditAiContent() {
       await new Promise(resolve => setTimeout(resolve, 100));
       
       try {
+        console.log('[EDITOR DEBUG] Calling populateProductMetafields:', {
+          draftId: draft.id,
+          productId: draft.productId,
+          timestamp: new Date().toISOString()
+        });
+        
         await populateProductMetafields({
           draftId: draft.id,
           productId: draft.productId
         } as any);
+        
+        console.log('[EDITOR DEBUG] populateProductMetafields completed successfully', {
+          timestamp: new Date().toISOString()
+        });
       } catch (actionError) {
-        console.error('populateProductMetafields error:', actionError);
+        console.error('[EDITOR DEBUG] populateProductMetafields error:', actionError);
         throw actionError;
       }
       
       // Step 3: Update draft status to published
+      console.log('[EDITOR DEBUG] Updating draft status to published:', {
+        draftId: draft.id,
+        timestamp: new Date().toISOString()
+      });
+      
       await updateDraft({
         id: draft.id,
         status: 'published',
         publishedAt: new Date()
       });
       
-      shopify.toast.show('Content published successfully! Images processed and metaobjects created.');
+      console.log('[EDITOR DEBUG] Draft status updated to published:', {
+        draftId: draft.id,
+        timestamp: new Date().toISOString()
+      });
       
-      // Navigate back after a delay
-      setTimeout(() => {
-        navigate('/');
-      }, 2000);
+      shopify.toast.show('Product details saved successfully! Images processed and metaobjects created.');
+      
+      // Stay on the same page - do not navigate away
+      setIsPublishing(false);
+      setPublishingStep('idle');
       
     } catch (error: any) {
-      console.error('Publish failed:', error);
+      console.error('[EDITOR DEBUG] Publish failed:', {
+        error: error?.message || error,
+        stack: error?.stack,
+        timestamp: new Date().toISOString()
+      });
       shopify.toast.show('Failed to publish content. Please try again.', { isError: true });
     } finally {
       setIsPublishing(false);
@@ -1221,6 +1273,11 @@ export default function EditAiContent() {
   }, []);
   
   const confirmDelete = useCallback(async () => {
+    console.log('[EDITOR DEBUG] confirmDelete called:', {
+      draftId: draft?.id,
+      timestamp: new Date().toISOString()
+    });
+    
     if (!draft?.id) return;
     
     try {
@@ -1232,6 +1289,11 @@ export default function EditAiContent() {
         status: 'draft'
       });
       
+      console.log('[EDITOR DEBUG] Draft cleared successfully, navigating away:', {
+        draftId: draft.id,
+        timestamp: new Date().toISOString()
+      });
+      
       shopify.toast.show('AI content deleted successfully!');
       setShowDeleteModal(false);
       
@@ -1240,7 +1302,7 @@ export default function EditAiContent() {
         navigate('/');
       }, 1500);
     } catch (error: any) {
-      console.error('Delete failed:', error);
+      console.error('[EDITOR DEBUG] Delete failed:', error);
       shopify.toast.show('Failed to delete content. Please try again.', { isError: true });
       setShowDeleteModal(false);
     }

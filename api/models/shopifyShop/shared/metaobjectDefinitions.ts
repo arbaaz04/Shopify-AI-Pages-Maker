@@ -52,6 +52,7 @@ export const METAOBJECT_DEFINITIONS: any[] = [
     access: { storefront: "PUBLIC_READ" },
     capabilities: { publishable: { enabled: true } },
     fieldDefinitions: [
+      { key: "product_intro_image", name: "Product Intro Image", type: "file_reference" }, // OF NOTE MIGHT CAUSE ISES WITH MINDPAL
       { key: "product_intro_headline", name: "Product Intro Headline", type: "single_line_text_field" },
       { key: "product_intro_subheadline", name: "Product Intro Subheadline", type: "single_line_text_field" },
       { key: "product_intro_description", name: "Product Intro Description", type: "multi_line_text_field" },
@@ -354,6 +355,21 @@ export const METAOBJECT_DEFINITIONS: any[] = [
       { key: "browse_other_products_headline", name: "Browse Other Products Headline", type: "single_line_text_field" },
     ],
   },
+  // 19. Image Storyboard
+  {
+    name: "Image Storyboard",
+    type: "image_storyboard",
+    access: { storefront: "PUBLIC_READ" },
+    capabilities: { publishable: { enabled: true } },
+    fieldDefinitions: [
+      { key: "problem_symptoms_image", name: "Problem Symptoms Image", type: "file_reference" },
+      { key: "product_benefits_image", name: "Product Benefits Image", type: "file_reference" },
+      { key: "how_it_works_all_steps_image", name: "How It Works All Steps Image", type: "file_reference" },
+      { key: "product_difference_image", name: "Product Difference Image", type: "file_reference" },
+      { key: "where_to_use_image", name: "Where To Use Image", type: "file_reference" },
+      { key: "who_its_for_image", name: "Who Its For Image", type: "file_reference" },
+    ],
+  },
 ];
 
 // Helper function to compare metaobject definitions
@@ -516,7 +532,7 @@ function compareMetafieldDefinitions(existing: any, desired: any, logger?: any):
 }
 
 // Helper function to handle field type changes with separate mutations to avoid DUPLICATE_FIELD_INPUT error
-async function handleFieldTypeChange({ connections, logger }: any, existingDefinition: any, desiredDefinition: any, fieldToChange: any, existingType: string, desiredType: string) {
+async function handleFieldTypeChange({ shopify, logger }: any, existingDefinition: any, desiredDefinition: any, fieldToChange: any, existingType: string, desiredType: string) {
   const type = existingDefinition.type;
   
   logger?.warn?.(`Handling field type change for "${fieldToChange.key}": ${existingType} → ${desiredType}`);
@@ -543,7 +559,7 @@ async function handleFieldTypeChange({ connections, logger }: any, existingDefin
     `;
     
     logger?.info?.(`Step 1: Deleting field "${fieldToChange.key}" with type ${existingType}`);
-    const deleteResult = await connections.shopify.current.graphql(deleteMutation, {
+    const deleteResult = await shopify.graphql(deleteMutation, {
       id: existingDefinition.id,
       definition: deleteInput
     });
@@ -573,7 +589,7 @@ async function handleFieldTypeChange({ connections, logger }: any, existingDefin
     };
     
     logger?.info?.(`Step 2: Creating field "${fieldToChange.key}" with type ${desiredType}`);
-    const createResult = await connections.shopify.current.graphql(deleteMutation, {
+    const createResult = await shopify.graphql(deleteMutation, {
       id: existingDefinition.id,
       definition: createInput
     });
@@ -601,7 +617,7 @@ async function handleFieldTypeChange({ connections, logger }: any, existingDefin
 }
 
 // Helper function to update existing metaobject definition in place (additive-only approach)
-async function updateMetaobjectDefinition({ connections, logger }: any, existingDefinition: any, desiredDefinition: any) {
+async function updateMetaobjectDefinition({ shopify, logger }: any, existingDefinition: any, desiredDefinition: any) {
   const type = existingDefinition.type;
   
   try {
@@ -693,7 +709,7 @@ async function updateMetaobjectDefinition({ connections, logger }: any, existing
           
           if (existingType !== desiredType) {
             // Handle this type change separately
-            const result = await handleFieldTypeChange({ connections, logger }, existingDefinition, desiredDefinition, desiredField, existingType, desiredType);
+            const result = await handleFieldTypeChange({ shopify, logger }, existingDefinition, desiredDefinition, desiredField, existingType, desiredType);
             
             // Update existingDefinition for next iteration
             existingDefinition = { ...existingDefinition, id: result.id };
@@ -749,7 +765,7 @@ async function updateMetaobjectDefinition({ connections, logger }: any, existing
       }
     `;
 
-    const result = await connections.shopify.current.graphql(updateMutation, {
+    const result = await shopify.graphql(updateMutation, {
       id: existingDefinition.id,
       definition: updateInput
     });
@@ -785,7 +801,7 @@ async function updateMetaobjectDefinition({ connections, logger }: any, existing
   }
 }
 
-export async function ensureMetaobjectDefinition({ connections, logger }: any, definition: any) {
+export async function ensureMetaobjectDefinition({ shopify, logger }: any, definition: any) {
   const type = definition?.type;
   if (!type) {
     logger?.warn?.(`Skipping metaobject definition without a type: ${JSON.stringify(definition)}`);
@@ -819,7 +835,7 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
 
   let existingDefinition = null;
   try {
-    const checkRes = await connections.shopify.current.graphql(checkQuery, { type });
+    const checkRes = await shopify.graphql(checkQuery, { type });
     existingDefinition = checkRes?.metaobjectDefinitionByType;
     
     if (existingDefinition?.id) {
@@ -847,7 +863,7 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
       // Always try to update in place with additive-only approach
       logger?.info?.(`Attempting additive-only update for metaobject definition: ${type}`);
       try {
-        const updateResult = await updateMetaobjectDefinition({ connections, logger }, existingDefinition, definition);
+        const updateResult = await updateMetaobjectDefinition({ shopify, logger }, existingDefinition, definition);
         if (updateResult) {
           return updateResult;
         } else {
@@ -875,7 +891,7 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
   `;
   
   try {
-      const result = await connections.shopify.current.graphql(createMutation, { definition });
+      const result = await shopify.graphql(createMutation, { definition });
       const userErrors = result?.metaobjectDefinitionCreate?.userErrors ?? [];
       
       if (userErrors.length) {
@@ -891,7 +907,7 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
           await new Promise(resolve => setTimeout(resolve, 3000));
           
           // Retry the creation once
-          const retryResult = await connections.shopify.current.graphql(createMutation, { definition });
+          const retryResult = await shopify.graphql(createMutation, { definition });
           const retryErrors = retryResult?.metaobjectDefinitionCreate?.userErrors ?? [];
           
           if (retryErrors.length === 0) {
@@ -904,7 +920,7 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
             logger?.warn?.(`Retry also failed for ${type}, falling back to checking if definition exists again`);
             // The definition might have been recreated in the meantime, check again
             try {
-              const recheckRes = await connections.shopify.current.graphql(checkQuery, { type });
+              const recheckRes = await shopify.graphql(checkQuery, { type });
               const recheckDefinition = recheckRes?.metaobjectDefinitionByType;
               if (recheckDefinition?.id) {
                 logger?.info?.(`Found existing definition after retry: ${type} (${recheckDefinition.id})`);
@@ -953,7 +969,7 @@ export async function ensureMetaobjectDefinition({ connections, logger }: any, d
     }
 }
 
-export async function ensureMetafieldDefinition({ connections, logger }: any, definition: any) {
+export async function ensureMetafieldDefinition({ shopify, logger }: any, definition: any) {
   const { namespace, key, ownerType } = definition;
   if (!namespace || !key || !ownerType) {
     logger?.warn?.(`Skipping metafield definition with missing fields: ${JSON.stringify(definition)}`);
@@ -987,7 +1003,7 @@ export async function ensureMetafieldDefinition({ connections, logger }: any, de
 
   let existingDefinition = null;
   try {
-    const checkRes = await connections.shopify.current.graphql(checkQuery, { ownerType, namespace, key });
+    const checkRes = await shopify.graphql(checkQuery, { ownerType, namespace, key });
     const edges = checkRes?.metafieldDefinitions?.edges;
     
     if (edges?.length > 0) {
@@ -1031,7 +1047,7 @@ export async function ensureMetafieldDefinition({ connections, logger }: any, de
     };
     
     try {
-      const result = await connections.shopify.current.graphql(updateMutation, { 
+      const result = await shopify.graphql(updateMutation, { 
         id: existingDefinition.id, 
         definition: updateInput 
       });
@@ -1066,7 +1082,7 @@ export async function ensureMetafieldDefinition({ connections, logger }: any, de
     `;
     
     try {
-      const result = await connections.shopify.current.graphql(createMutation, { definition });
+      const result = await shopify.graphql(createMutation, { definition });
       const userErrors = result?.metafieldDefinitionCreate?.userErrors ?? [];
       
       if (userErrors.length) {
@@ -1100,7 +1116,20 @@ export async function ensureMetafieldDefinition({ connections, logger }: any, de
 
 export async function setupMetaobjectsAndMetafields({ connections, logger, api, record }: any) {
   // Create metaobject definitions (idempotent)
-  if (!connections?.shopify?.current) {
+  // Get Shopify connection - try current first (UI mode), then forShop (webhook mode)
+  let shopify = connections?.shopify?.current;
+  
+  if (!shopify && record) {
+    // Webhook mode - create connection using the shop record
+    try {
+      shopify = await connections.shopify.forShop(record);
+      logger?.info?.("Using shop-specific Shopify connection for webhook mode");
+    } catch (error) {
+      logger?.error?.("Failed to get shop-specific Shopify connection", { error: String(error) });
+    }
+  }
+  
+  if (!shopify) {
     logger?.warn?.("Shopify connection not available; skipping metaobject setup");
     return;
   }
@@ -1111,7 +1140,7 @@ export async function setupMetaobjectsAndMetafields({ connections, logger, api, 
   logger?.info?.("Creating sectional metaobject definitions...");
   for (const def of METAOBJECT_DEFINITIONS) {
     try {
-      const result = await ensureMetaobjectDefinition({ connections, logger }, def);
+      const result = await ensureMetaobjectDefinition({ shopify, logger }, def);
       if (result?.type && result?.id) {
         definitionIds[result.type] = result.id;
       }
@@ -1232,10 +1261,16 @@ export async function setupMetaobjectsAndMetafields({ connections, logger, api, 
           type: "metaobject_reference",
           validations: definitionIds.store_credibility ? [{ name: "metaobject_definition_id", value: definitionIds.store_credibility }] : []
         },
+        {
+          key: "image_storyboard",
+          name: "Image Storyboard",
+          type: "metaobject_reference",
+          validations: definitionIds.image_storyboard ? [{ name: "metaobject_definition_id", value: definitionIds.image_storyboard }] : []
+        },
       ],
     };
 
-    const result = await ensureMetaobjectDefinition({ connections, logger }, masterDefinition);
+    const result = await ensureMetaobjectDefinition({ shopify, logger }, masterDefinition);
     if (result?.type && result?.id) {
       definitionIds[result.type] = result.id;
     }
@@ -1261,7 +1296,7 @@ export async function setupMetaobjectsAndMetafields({ connections, logger, api, 
       ]
     };
     try {
-      const result = await ensureMetafieldDefinition({ connections, logger }, productMetafieldDefinition);
+      const result = await ensureMetafieldDefinition({ shopify, logger }, productMetafieldDefinition);
       if (result?.fieldKey && result?.id) {
         definitionIds[result.fieldKey] = result.id;
       }
