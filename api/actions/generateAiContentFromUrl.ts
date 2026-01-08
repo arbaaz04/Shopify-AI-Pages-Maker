@@ -5,6 +5,92 @@ import type { AnyGlobalActionContext } from "gadget-server";
  * This action sends product information and URL to Mindpal.io for AI processing
  */
 
+/**
+ * Fetch product images from Shopify and convert them to base64 data URLs
+ */
+async function fetchProductImages(shopify: any, productGid: string, logger: any): Promise<{ [key: string]: string }> {
+  const imagePayload: { [key: string]: string } = {};
+  
+  try {
+    logger?.info(`Fetching product images for product: ${productGid}`);
+    
+    const imagesQuery = `
+      query ProductImagesForBase64($id: ID!) {
+        product(id: $id) {
+          id
+          title
+          images(first: 5) {
+            nodes {
+              id
+              altText
+              url
+            }
+          }
+        }
+      }
+    `;
+    
+    const result = await shopify.graphql(imagesQuery, { id: productGid });
+    const images = result?.product?.images?.nodes || [];
+    
+    logger?.info(`Found ${images.length} product images`);
+    
+    // Convert images to base64 and add to payload
+    for (let i = 0; i < images.length && i < 5; i++) {
+      const image = images[i];
+      try {
+        if (image.url) {
+          logger?.info(`Processing image ${i + 1}: ${image.url}`);
+          
+          const response = await fetch(image.url);
+          if (!response.ok) {
+            logger?.warn(`Failed to fetch image ${i + 1}: HTTP ${response.status}`);
+            continue;
+          }
+          
+          const buffer = await response.arrayBuffer();
+          const base64String = Buffer.from(buffer).toString('base64');
+          const mimeType = response.headers.get('content-type') || 'image/jpeg';
+          const base64DataUrl = `data:${mimeType};base64,${base64String}`;
+          
+          const imageKey = `product_image${i + 1}`;
+          imagePayload[imageKey] = base64DataUrl;
+          
+          logger?.info(`Successfully converted image ${i + 1} to base64 (size: ${(base64String.length / 1024).toFixed(2)} KB)`);
+        }
+      } catch (error) {
+        logger?.warn(`Error processing image ${i + 1}: ${String(error)}`);
+        continue;
+      }
+    }
+    
+    if (Object.keys(imagePayload).length > 0) {
+      logger?.info(`Successfully fetched and converted ${Object.keys(imagePayload).length} product images`);
+    } else {
+      logger?.warn(`No product images were successfully converted to base64`);
+    }
+  } catch (error) {
+    logger?.warn(`Error fetching product images: ${String(error)}`);
+  }
+  
+  return imagePayload;
+}
+
+function summarizePayload(payload: Record<string, any>, maxChars = 150) {
+  const head: Record<string, any> = {};
+  for (const key of Object.keys(payload || {})) {
+    const val = payload[key];
+    if (key.startsWith('product_image') && typeof val === 'string') {
+      head[key] = val.slice(0, maxChars) + (val.length > maxChars ? '... (truncated)' : '');
+    } else if (typeof val === 'string' && val.length > maxChars) {
+      head[key] = val.slice(0, maxChars) + '... (truncated)';
+    } else {
+      head[key] = val;
+    }
+  }
+  return head;
+}
+
 export const params = {
   productId: { type: "string" },
   productUrl: { type: "string" }
@@ -169,17 +255,30 @@ export async function run({ params, logger, connections, session, api }: any) {
 
     logger?.info("Constructed webhook URL", { webhookUrl });
 
+    // Fetch product images and convert to base64
+    const productImages = await fetchProductImages(shopify, fullProductGid, logger);
+
     const mindpalPayload = {
       product_id: fullProductGid,
       shop_id: finalShopId, // Use shop domain for external API
       webhook_url: webhookUrl,
       generation_job_id: generationJob.id, // Add this so Mindpal sends it back
-      product_url: productUrl // Add the product URL to the payload
+      product_url: productUrl, // Add the product URL to the payload
+      ...productImages // Spread product images as product_image1, product_image2, etc.
     };
 
     const mindpalUrl = `https://api-v3.mindpal.io/api/workflow/run?workflow_id=${workflowId}&workflow_run_title=AI Sales Page Generation`;
 
-    logger?.info("Sending request to Mindpal.io", { payload: mindpalPayload, url: mindpalUrl });
+    const payloadHead = summarizePayload(mindpalPayload);
+    logger?.info("Sending request to Mindpal.io", { url: mindpalUrl });
+    logger?.info("Mindpal payload head", { payload_head: payloadHead });
+    // Also log to the server console so you can see the payload in your terminal
+    try {
+      console.log('Sending request to Mindpal.io', mindpalUrl);
+      console.log('Mindpal payload head:', JSON.stringify(payloadHead, null, 2));
+    } catch (e) {
+      logger?.info("Console log failed", { error: String(e) });
+    }
 
     const mindpalResponse = await fetch(mindpalUrl, {
       method: "POST",
