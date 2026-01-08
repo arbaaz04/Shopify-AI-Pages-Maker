@@ -1299,7 +1299,7 @@ export default function EditAiContent() {
       
       // Navigate back after a delay
       setTimeout(() => {
-        navigate('/');
+        navigate('/products');
       }, 1500);
     } catch (error: any) {
       console.error('[EDITOR DEBUG] Delete failed:', error);
@@ -1337,9 +1337,9 @@ export default function EditAiContent() {
   const handleBack = useCallback(() => {
     if (hasChanges) {
       setShowUnsavedModal(true);
-      setPendingNavigation(() => () => navigate('/'));
+      setPendingNavigation(() => () => navigate('/products'));
     } else {
-      navigate('/');
+      navigate('/products');
     }
   }, [hasChanges, navigate]);
 
