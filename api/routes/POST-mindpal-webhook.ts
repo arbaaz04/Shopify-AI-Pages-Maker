@@ -187,27 +187,38 @@ async function processWebhookData(payload: any, logger: any, api: any, connectio
           });
           
           if (shopWithToken) {
-            await setupMetaobjectsAndMetafields({
-              connections,
-              logger,
-              api,
-              record: shopWithToken
-            });
-            
-            logger.info("Metaobject definitions setup completed successfully" as any);
+            // Call setup with error handling to prevent cascade failures
+            try {
+              await setupMetaobjectsAndMetafields({
+                connections,
+                logger,
+                api,
+                record: shopWithToken
+              });
+              
+              logger.info("Metaobject definitions setup completed successfully" as any);
+            } catch (setupError: any) {
+              logger.warn("Metaobject definitions setup encountered an error but continuing webhook processing" as any, {
+                error: setupError.message,
+                shopId: generationJob.shop?.id,
+                errorCode: setupError.code
+              });
+              // Don't throw - continue with webhook processing even if setup fails
+              // The Shopify connection may have the definitions already from previous runs
+            }
           } else {
             logger.warn("Shop record not found, skipping metaobject setup" as any, {
               shopId: generationJob.shop?.id
             });
           }
-        } catch (setupError: any) {
-          logger.error("Failed to setup metaobject definitions" as any, {
-            error: setupError.message,
-            shopId: generationJob.shop?.id,
-            shopDomain
+        } catch (fetchShopError: any) {
+          logger.warn("Failed to fetch shop record for metaobject setup" as any, { 
+            generationJobId,
+            error: fetchShopError.message,
+            errorCode: fetchShopError.code
           });
-          // Don't fail the entire webhook if setup fails - continue with metaobject creation
-          // The Shopify connection may have the definitions already
+          // Don't fail the webhook if we can't fetch the shop - continue with content processing
+          // Metaobject definitions may already exist from previous setup calls
         }
         
         logger.info("Found generation job for webhook" as any, { 
